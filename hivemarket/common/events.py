@@ -8,7 +8,7 @@ envelope, so all sources can be merged into a single timeline:
     ts         epoch seconds (float, microsecond resolution) when it happened
     ts_iso     same, ISO-8601 UTC
     source     component that observed it: market | gateway | collector |
-               agent | netmon | orchestrator
+               agent | monitor | orchestrator
     agent_id   agent the event is attributed to (None for global events)
     kind       event type, e.g. "trade", "llm_turn", "flow"
     data       kind-specific payload

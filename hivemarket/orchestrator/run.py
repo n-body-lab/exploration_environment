@@ -8,6 +8,7 @@ runs/<run_id>/
   docker-compose.yml   (docker mode)
   logs/                every component's JSONL events
   pcap/                per-agent packet captures (docker mode)
+  artifacts/<agent>/   workspace file versions, final workspace snapshot, container diff
 """
 
 from __future__ import annotations
@@ -21,22 +22,23 @@ import yaml
 
 from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig, provider_kind
 from hivemarket.common.manifest import AgentEntry, Manifest, ServiceEntry
+from hivemarket.orchestrator.network import allocate_subnet, host
 from hivemarket.orchestrator.world import build_world, new_token
 
-SUBNET = "10.77.0.0/24"
-SERVICE_IPS = {"market": "10.77.0.10", "gateway": "10.77.0.11", "collector": "10.77.0.12"}
+SERVICE_OCTETS = {"market": 10, "gateway": 11, "collector": 12}
+FIRST_AGENT_OCTET = 101
 INBOX_PORT = 7000
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _agent_ip(i: int) -> str:
-    return f"10.77.0.{101 + i}"
-
-
 def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode: str = "docker",
-               run_id: str | None = None, local_base_port: int = 18100) -> Path:
+               run_id: str | None = None, local_base_port: int = 18100,
+               used_subnets: set[str] | None = None) -> Path:
     experiment_path = Path(experiment_path).resolve()
     cfg = ExperimentConfig.load(experiment_path)
+    if cfg.transparency.mode == "files" and mode != "docker":
+        raise SystemExit("transparency mode 'files' needs Docker (the monitor sidecar publishes and audits the files); "
+                         "use mode 'tool' for local runs.")
     run_id = run_id or f"{cfg.name}-{time.strftime('%Y%m%d-%H%M%S')}"
     run_dir = Path(runs_dir).resolve() / run_id
     (run_dir / "logs").mkdir(parents=True, exist_ok=False)
@@ -52,10 +54,13 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     world = build_world(cfg, agent_ids)
     (run_dir / "world.json").write_text(json.dumps(world, indent=2))
 
+    subnet = None
     if mode == "docker":
-        services = {name: ServiceEntry(ip=ip, url=f"http://{name}:8000") for name, ip in SERVICE_IPS.items()}
+        subnet = allocate_subnet(Path(runs_dir).resolve(), run_id, used_subnets)
+        services = {name: ServiceEntry(ip=host(subnet, o), url=f"http://{name}:8000") for name, o in SERVICE_OCTETS.items()}
         entries = [
-            AgentEntry(id=aid, token=new_token(), ip=_agent_ip(i), inbox_host=aid, inbox_port=INBOX_PORT,
+            AgentEntry(id=aid, token=new_token(), ip=host(subnet, FIRST_AGENT_OCTET + i), inbox_host=aid,
+                       inbox_port=INBOX_PORT,
                        provider=spec.provider, model=spec.model, spec=spec.model_dump())
             for i, (aid, spec) in enumerate(agents)
         ]
@@ -72,7 +77,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     manifest = Manifest(
         run_id=run_id, experiment=cfg.name, mode=mode, admin_token=new_token(),
         duration_seconds=cfg.duration_seconds, agents=entries, services=services,
-        enforce_source_ip=cfg.market.enforce_source_ip,
+        enforce_source_ip=cfg.market.enforce_source_ip, subnet=subnet,
     )
     manifest.save(run_dir / "manifest.json")
     if cfg.gateway_routes:
@@ -92,6 +97,9 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             inbox_port=entry.inbox_port,
             spec=entry.spec,
             affordance=cfg.affordance,
+            transparency=cfg.transparency,
+            readable_agents=cfg.transparency.readable_by(entry.id, agent_ids),
+            watched=cfg.transparency.watched_by_someone(entry.id, agent_ids),
             peers={a.id: f"{a.inbox_host}:{a.inbox_port}" for a in entries if a.id != entry.id} if disclose_peers else {},
             prompt_template=prompt_template,
             sandbox_user="sandbox" if mode == "docker" else None,

@@ -40,6 +40,46 @@ class AffordanceConfig(BaseModel):
     deliver_direct_messages: bool = True  # surface incoming direct connections to the recipient agent
 
 
+ExposeField = Literal["text", "reasoning", "tool_calls", "tool_results"]
+
+
+class TransparencyConfig(BaseModel):
+    """Whether agents can see other agents' traces, and how.
+
+    files - read-only copies under `mount_path` on the agent's machine; reads are
+            recorded per agent by its monitor sidecar (docker mode only)
+    tool  - a `read_agent_traces` tool served by the collector; every read logged
+    """
+
+    mode: Literal["off", "files", "tool"] = "off"
+    expose: list[ExposeField] = Field(default_factory=lambda: ["text", "reasoning", "tool_calls"])
+    visibility: Literal["all"] | dict[str, list[str]] = "all"  # reader -> targets it may read
+    delay_seconds: float = 0
+    disclose_to_subjects: bool = True  # tell agents that others may read their traces
+    announce_access: bool = True  # tell readers how to read others' traces (files: where they are)
+    mount_path: str = "/shared/agents"
+
+    def can_see(self, reader: str, target: str) -> bool:
+        if self.mode == "off" or reader == target:
+            return False
+        if self.visibility == "all":
+            return True
+        return target in self.visibility.get(reader, [])
+
+    def readable_by(self, reader: str, agent_ids: list[str]) -> list[str]:
+        return [a for a in agent_ids if self.can_see(reader, a)]
+
+    def watched_by_someone(self, target: str, agent_ids: list[str]) -> bool:
+        return any(self.can_see(r, target) for r in agent_ids)
+
+
+class MonitoringConfig(BaseModel):
+    capture_workspace: bool = True  # version every file the agent writes in its home directory
+    max_file_bytes: int = 10_000_000  # larger files are recorded as metadata only
+    capture_container_diff: bool = True  # at teardown, copy out files changed outside the workspace
+    max_diff_files: int = 500
+
+
 class ImpossibleSpec(BaseModel):
     """Makes some agents' tasks impossible through the sanctioned channel.
 
@@ -88,6 +128,8 @@ class ExperimentConfig(BaseModel):
     affordance: AffordanceConfig = Field(default_factory=AffordanceConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
+    transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     prompt_file: str | None = None  # relative to the experiment file; default prompts/system.md
     gateway_routes: dict[str, GatewayRoute] = Field(default_factory=dict)
     agent_resources: dict[str, str] = Field(default_factory=lambda: {"cpus": "1.0", "memory": "1g"})
@@ -134,6 +176,9 @@ class AgentRuntimeConfig(BaseModel):
     inbox_port: int = 7000
     spec: AgentSpec
     affordance: AffordanceConfig
+    transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
+    readable_agents: list[str] = Field(default_factory=list)  # whose traces this agent may read
+    watched: bool = False  # whether any other agent may read this agent's traces
     peers: dict[str, str] = Field(default_factory=dict)  # agent_id -> host:port, only when disclosed
     prompt_template: str
     sandbox_user: str | None = "sandbox"

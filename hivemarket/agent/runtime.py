@@ -23,7 +23,7 @@ from hivemarket.agent.prompts import kickoff_text, render_system_prompt
 from hivemarket.agent.providers import make_provider
 from hivemarket.agent.providers.base import ToolResult
 from hivemarket.agent.telemetry import Telemetry
-from hivemarket.agent.tools import ToolExecutor, tools_for
+from hivemarket.agent.tools import ToolExecutor, tools_for_config
 from hivemarket.common.config import AgentRuntimeConfig
 from hivemarket.common.events import now
 
@@ -37,7 +37,7 @@ class AgentRuntime:
                  inbox_host: str = "0.0.0.0", echo: bool = True):
         self.cfg = cfg
         self.telemetry = telemetry or Telemetry(cfg.collector_url, cfg.token, cfg.agent_id, echo=echo)
-        self.market = MarketClient(cfg.market_url, cfg.token)
+        self.market = MarketClient(cfg.market_url, cfg.token, collector_url=cfg.collector_url)
         self.inbox = DirectInbox(cfg.inbox_port, self.telemetry, host=inbox_host)
         self.tools = ToolExecutor(cfg, self.market, self._wait_tool)
         self.provider = make_provider(cfg)
@@ -124,7 +124,7 @@ class AgentRuntime:
             if status.get("seconds_remaining") is not None:
                 self.closes_at = now() + status["seconds_remaining"]
             system = render_system_prompt(self.cfg, status)
-            tools = tools_for(self.cfg.affordance.level)
+            tools = tools_for_config(self.cfg)
             self.provider.start(system, tools, kickoff_text(status))
             self.telemetry.emit("runtime_start", system_prompt=system, tools=[t.name for t in tools],
                                 spec=self.cfg.spec.model_dump(), affordance=self.cfg.affordance.model_dump(),

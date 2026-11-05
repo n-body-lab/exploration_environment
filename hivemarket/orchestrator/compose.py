@@ -1,14 +1,18 @@
 """docker-compose generation and lifecycle for a run.
 
-Topology
-  agentnet (internal, no internet): market, collector, gateway, netmon-* (agents share netmon's namespace)
+Topology (one private subnet per run, so runs can execute in parallel)
+  agentnet (internal, no internet): market, collector, gateway, monitor-* (agents share their monitor's namespace)
   egress: gateway only - the single path to model providers
 
-Each agent runs inside the network namespace owned by its netmon sidecar
-(`network_mode: service:netmon-<agent>`). The sidecar starts first and is
+Each agent runs inside the network namespace owned by its monitor sidecar
+(`network_mode: service:monitor-<agent>`). The sidecar starts first and is
 healthy only once tcpdump is capturing, so no agent packet goes unrecorded.
 The sidecar carries the `agent-N` DNS alias, so peers reach the agent at
 agent-N:7000 exactly as if it were attached directly.
+
+Per-agent volumes, each shared only between an agent and its own monitor:
+  ws-<agent>    the agent's /home/sandbox; the monitor versions every write
+  view-<agent>  transparency files mode: traces the agent may read (read-only for the agent)
 """
 
 from __future__ import annotations
@@ -21,10 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from hivemarket.common.config import ExperimentConfig
+from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
-from hivemarket.orchestrator.run import REPO_ROOT, SERVICE_IPS, SUBNET
+from hivemarket.orchestrator.network import release_subnet
+from hivemarket.orchestrator.run import REPO_ROOT
 
 KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+DIFF_SKIP = re.compile(r"^/(proc|sys|dev|run)(/|$)|__pycache__|\.pyc$")
 
 
 def project_name(run_dir: Path) -> str:
@@ -42,51 +49,64 @@ def _escape(value: str) -> str:
 def build_compose(cfg: ExperimentConfig, manifest: Manifest, run_dir: Path) -> dict[str, Any]:
     vol = [f"{run_dir}:/run_data"]
     services: dict[str, Any] = {}
+    volumes: dict[str, Any] = {}
+    agent_ids = [a.id for a in manifest.agents]
 
     def core(name: str, module: str, extra_networks: dict | None = None) -> dict[str, Any]:
-        svc = {
+        return {
             "image": "hivemarket/core:dev",
             "build": _build("core"),
             "command": ["python", "-m", module],
             "environment": {"RUN_DIR": "/run_data"},
             "volumes": vol,
-            "networks": {"agentnet": {"ipv4_address": SERVICE_IPS[name]}, **(extra_networks or {})},
+            "networks": {"agentnet": {"ipv4_address": manifest.services[name].ip}, **(extra_networks or {})},
             "healthcheck": {
                 "test": ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"],
                 "interval": "2s", "timeout": "3s", "retries": 30,
             },
         }
-        return svc
 
     services["market"] = core("market", "hivemarket.market")
     services["collector"] = core("collector", "hivemarket.collector")
     gateway = core("gateway", "hivemarket.gateway", {"egress": {}})
     key_envs = KEY_ENVS + [r.api_key_env for r in cfg.gateway_routes.values()]
     gateway["environment"].update({k: f"${{{k}:-}}" for k in dict.fromkeys(key_envs)})
+    gateway["extra_hosts"] = ["host.docker.internal:host-gateway"]  # self-hosted models on the Docker host (Linux)
     services["gateway"] = gateway
 
     deps = {s: {"condition": "service_healthy"} for s in ("market", "collector", "gateway")}
     res = cfg.agent_resources
     for agent in manifest.agents:
-        netmon = f"netmon-{agent.id}"
-        services[netmon] = {
-            "image": "hivemarket/netmon:dev",
-            "build": _build("netmon"),
-            "command": ["python", "-m", "hivemarket.netmon"],
+        monitor = f"monitor-{agent.id}"
+        ws, view = f"ws-{agent.id}", f"view-{agent.id}"
+        volumes[ws] = {}
+        monitor_vols = vol + [f"{ws}:/watch/workspace"]
+        agent_vols = [f"{ws}:/home/sandbox"]
+        if cfg.transparency.mode == "files" and cfg.transparency.readable_by(agent.id, agent_ids):
+            volumes[view] = {}
+            monitor_vols.append(f"{view}:/watch/shared")
+            agent_vols.append(f"{view}:{cfg.transparency.mount_path}:ro")
+
+        services[monitor] = {
+            "image": "hivemarket/monitor:dev",
+            "build": _build("monitor"),
+            "command": ["python", "-m", "hivemarket.monitor"],
             "hostname": agent.id,
             "environment": {"RUN_DIR": "/run_data", "AGENT_ID": agent.id},
-            "volumes": vol,
+            "volumes": monitor_vols,
             "cap_add": ["NET_RAW", "NET_ADMIN"],
             "networks": {"agentnet": {"ipv4_address": agent.ip, "aliases": [agent.id]}},
             "expose": [str(agent.inbox_port)],
+            "stop_grace_period": "30s",  # time to flush flows and snapshot the workspace
             "healthcheck": {"test": ["CMD", "test", "-f", "/tmp/capturing"], "interval": "1s", "retries": 30},
         }
         agent_cfg = (run_dir / "agents" / f"{agent.id}.json").read_text()
         services[agent.id] = {
             "image": "hivemarket/agent:dev",
             "build": _build("agent"),
-            "network_mode": f"service:{netmon}",
+            "network_mode": f"service:{monitor}",
             "environment": {"AGENT_CONFIG": _escape(json.dumps(json.loads(agent_cfg)))},
+            "volumes": agent_vols,
             "cap_drop": ["ALL"],
             "cap_add": ["SETUID", "SETGID"],  # only to drop the bash tool to the sandbox user
             "security_opt": ["no-new-privileges:true"],
@@ -94,16 +114,17 @@ def build_compose(cfg: ExperimentConfig, manifest: Manifest, run_dir: Path) -> d
             "cpus": float(res.get("cpus", 1.0)),
             "mem_limit": res.get("memory", "1g"),
             "restart": "no",
-            "depends_on": {**deps, netmon: {"condition": "service_healthy"}},
+            "depends_on": {**deps, monitor: {"condition": "service_healthy"}},
         }
 
     return {
         "name": project_name(run_dir),
         "services": services,
         "networks": {
-            "agentnet": {"driver": "bridge", "internal": True, "ipam": {"config": [{"subnet": SUBNET}]}},
+            "agentnet": {"driver": "bridge", "internal": True, "ipam": {"config": [{"subnet": manifest.subnet}]}},
             "egress": {"driver": "bridge"},
         },
+        "volumes": volumes,
     }
 
 
@@ -132,22 +153,72 @@ def close_market(run_dir: Path) -> None:
     _compose(run_dir, "exec", "-T", "market", "python", "-c", code, check=False)
 
 
+def parse_diff(text: str) -> list[tuple[str, str]]:
+    """`docker diff` output -> [(kind A|C|D, path)], noise removed."""
+    out = []
+    for line in text.splitlines():
+        kind, _, path = line.strip().partition(" ")
+        if kind in ("A", "C", "D") and path and not DIFF_SKIP.search(path):
+            out.append((kind, path))
+    return out
+
+
+def diff_leaves(entries: list[tuple[str, str]]) -> list[str]:
+    """Added/changed paths that are not parents of other listed paths (docker cp copies dirs recursively)."""
+    paths = sorted(p for k, p in entries if k in ("A", "C"))
+    return [p for i, p in enumerate(paths) if not (i + 1 < len(paths) and paths[i + 1].startswith(p + "/"))]
+
+
+def capture_container_diffs(run_dir: Path, manifest: Manifest, cfg: ExperimentConfig, log: EventLog) -> None:
+    """Copy out files each agent changed outside its workspace volume before containers are removed."""
+    for agent in manifest.agents:
+        cid = _compose(run_dir, "ps", "-a", "-q", agent.id, capture_output=True, text=True).stdout.strip()
+        if not cid:
+            continue
+        diff = subprocess.run(["docker", "diff", cid], capture_output=True, text=True)
+        entries = parse_diff(diff.stdout)
+        out = run_dir / "artifacts" / agent.id
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "container_diff.json").write_text(json.dumps([{"kind": k, "path": p} for k, p in entries], indent=1))
+        copied = []
+        for path in diff_leaves(entries)[: cfg.monitoring.max_diff_files]:
+            dest = out / "rootfs" / path.lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if subprocess.run(["docker", "cp", f"{cid}:{path}", str(dest)], capture_output=True).returncode == 0:
+                copied.append(path)
+        log.emit("container_diff", agent_id=agent.id, added=sum(k == "A" for k, _ in entries),
+                 changed=sum(k == "C" for k, _ in entries), deleted=sum(k == "D" for k, _ in entries),
+                 copied=copied, artifact=str((out / "container_diff.json").relative_to(run_dir)))
+
+
 def run_docker(run_dir: Path, build: bool = True, grace_seconds: float = 120) -> None:
     manifest = Manifest.load(run_dir / "manifest.json")
+    cfg = ExperimentConfig.load(run_dir / "experiment.yaml")
+    log = EventLog("orchestrator", manifest.run_id, JsonlSink(run_dir / "logs" / "orchestrator.jsonl"))
     agent_ids = [a.id for a in manifest.agents]
-    _compose(run_dir, "up", "-d", *(["--build"] if build else []), check=True)
-    deadline = time.time() + manifest.duration_seconds + grace_seconds
+    log.emit("run_starting", subnet=manifest.subnet, agents=agent_ids)
     try:
+        _compose(run_dir, "up", "-d", *(["--build"] if build else []), check=True)
+        deadline = time.time() + manifest.duration_seconds + grace_seconds
         while time.time() < deadline:
             states = _agent_states(run_dir, agent_ids)
-            if states and all(s in ("exited", "dead") for s in states.values()) and len(states) == len(agent_ids):
+            if len(states) == len(agent_ids) and all(s in ("exited", "dead") for s in states.values()):
                 break
             time.sleep(5)
     except KeyboardInterrupt:
         print("interrupted - closing market")
+        log.emit("run_interrupted")
     finally:
         close_market(run_dir)
-        time.sleep(3)  # let netmon flush in-flight flows
+        time.sleep(3)  # let monitors flush in-flight flows
+        if cfg.monitoring.capture_container_diff:
+            capture_container_diffs(run_dir, manifest, cfg, log)
+        # Stopping the monitors makes them write the final workspace snapshot.
+        _compose(run_dir, "stop", "-t", "30", check=False)
         with open(run_dir / "logs" / "docker_compose.log", "w") as f:
             _compose(run_dir, "logs", "--no-color", "--timestamps", stdout=f, stderr=subprocess.STDOUT)
-        _compose(run_dir, "down", "--remove-orphans", check=False)
+        # -v removes only this run's volumes; their contents were captured above.
+        _compose(run_dir, "down", "-v", "--remove-orphans", check=False)
+        if manifest.subnet:
+            release_subnet(run_dir.parent, manifest.subnet)
+        log.emit("run_finished")

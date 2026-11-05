@@ -2,7 +2,7 @@
 
 A plain TCP listener that accepts both raw TCP payloads (e.g. `nc`) and
 HTTP requests (e.g. `curl`). Anything received is logged as an application
-level trace and queued for delivery to the agent. The netmon sidecar
+level trace and queued for delivery to the agent. The monitor sidecar
 independently records the same traffic at packet level.
 """
 

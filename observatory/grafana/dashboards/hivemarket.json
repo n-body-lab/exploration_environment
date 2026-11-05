@@ -1,0 +1,278 @@
+{
+ "uid": "hivemarket-run",
+ "title": "HiveMarket run",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "5s",
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "tags": [
+  "hivemarket"
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "run_id",
+    "label": "Run",
+    "type": "query",
+    "datasource": {
+     "type": "grafana-clickhouse-datasource",
+     "uid": "hivemarket-clickhouse"
+    },
+    "refresh": 2,
+    "query": "SELECT run_id FROM hivemarket.runs FINAL ORDER BY created_at DESC",
+    "definition": "SELECT run_id FROM hivemarket.runs FINAL ORDER BY created_at DESC"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "table",
+   "title": "Agents",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT agent_id, countIf(source='agent' AND kind='llm_turn') AS turns, countIf(source='agent' AND kind='tool_call') AS tool_calls, countIf(source='market' AND kind='trade') AS trades_as_buyer, countIf(source='market' AND kind='buy_failed') AS failed_buys, countIf(source='market' AND kind='message') AS messages, countIf(kind='trace_read') AS trace_reads, countIf(source='monitor' AND kind='file_write') AS file_writes, countIf(kind IN ('off_channel_contact','direct_inbound','unexplained_knowledge','identity_mismatch')) AS offchannel_signals FROM hivemarket.events FINAL WHERE run_id = '${run_id}' AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY agent_id"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "Event rate by source",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 7,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 0,
+     "queryType": "timeseries",
+     "rawSql": "SELECT toStartOfInterval(ts, INTERVAL 10 second) AS time, source, count() AS events FROM hivemarket.events WHERE run_id = '${run_id}' GROUP BY time, source ORDER BY time"
+    }
+   ],
+   "options": {}
+  },
+  {
+   "id": 3,
+   "type": "table",
+   "title": "LLM tokens by agent",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 7,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT agent_id, any(model) AS model, count() AS calls, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, round(avg(latency_ms)) AS avg_latency_ms FROM hivemarket.v_llm_usage WHERE run_id = '${run_id}' GROUP BY agent_id ORDER BY agent_id"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 4,
+   "type": "table",
+   "title": "Off-channel indicators",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 24,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, agent_id, level, source, kind, substring(data, 1, 300) AS detail FROM hivemarket.v_offchannel WHERE run_id = '${run_id}' ORDER BY ts DESC LIMIT 500"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 5,
+   "type": "table",
+   "title": "Trades",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, buyer, seller, item_id, price FROM hivemarket.v_trades WHERE run_id = '${run_id}' ORDER BY ts DESC"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 6,
+   "type": "table",
+   "title": "Trace reads (transparency)",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, reader, target, mode, records, read_calls FROM hivemarket.v_trace_reads WHERE run_id = '${run_id}' ORDER BY ts DESC"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 7,
+   "type": "table",
+   "title": "Agent turns",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 24,
+    "h": 10
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, agent_id, step, tools, substring(text, 1, 400) AS text FROM hivemarket.v_agent_turns WHERE run_id = '${run_id}' ORDER BY ts DESC LIMIT 300"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 8,
+   "type": "table",
+   "title": "Workspace file activity",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 42,
+    "w": 24,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, agent_id, kind, path, size, version, substring(preview, 1, 200) AS preview FROM hivemarket.v_file_activity WHERE run_id = '${run_id}' ORDER BY ts DESC LIMIT 300"
+    }
+   ],
+   "options": {
+    "showHeader": true
+   }
+  }
+ ]
+}

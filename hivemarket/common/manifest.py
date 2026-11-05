@@ -1,12 +1,13 @@
 """Run manifest: identities, credentials and addresses for one run.
 
 The manifest is readable only by trusted services (market, gateway,
-collector, netmon). Agents receive just their own entry via env vars.
+collector, monitor). Agents receive just their own entry via env vars.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,8 @@ class Manifest(BaseModel):
     agents: list[AgentEntry]
     services: dict[str, ServiceEntry]
     enforce_source_ip: bool = True
+    subnet: str | None = None  # docker mode: this run's private agent network
+    created_at: float = Field(default_factory=time.time)
 
     def agent(self, agent_id: str) -> AgentEntry | None:
         return next((a for a in self.agents if a.id == agent_id), None)

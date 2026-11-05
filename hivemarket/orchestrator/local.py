@@ -18,7 +18,7 @@ import uvicorn
 
 from hivemarket.agent.runtime import AgentRuntime
 from hivemarket.collector.app import create_app as collector_app
-from hivemarket.common.config import AgentRuntimeConfig
+from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig
 from hivemarket.common.manifest import Manifest
 from hivemarket.gateway.app import create_app as gateway_app
 from hivemarket.market.__main__ import build as market_app
@@ -27,6 +27,7 @@ from hivemarket.market.__main__ import build as market_app
 async def run_local(run_dir: Path, *, allow_unsandboxed_shell: bool = False, echo: bool = False,
                     grace_seconds: float = 30) -> dict[str, str]:
     manifest = Manifest.load(run_dir / "manifest.json")
+    experiment = ExperimentConfig.load(run_dir / "experiment.yaml")
     routes_path = run_dir / "gateway_routes.json"
     routes = json.loads(routes_path.read_text()) if routes_path.exists() else None
 
@@ -42,7 +43,7 @@ async def run_local(run_dir: Path, *, allow_unsandboxed_shell: bool = False, ech
 
     apps = {
         "market": market_app(run_dir, echo=echo),
-        "collector": collector_app(manifest, run_dir),
+        "collector": collector_app(manifest, run_dir, experiment.transparency),
         "gateway": gateway_app(manifest, run_dir, routes),
     }
     servers = [

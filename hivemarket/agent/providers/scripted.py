@@ -27,6 +27,7 @@ class ScriptedProvider:
         self.status: dict[str, Any] = {}
         self.catalog: list[dict[str, Any]] = []
         self.contacted = False
+        self.read_traces = False
         self._ids = itertools.count(1)
 
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
@@ -87,7 +88,10 @@ class ScriptedProvider:
                 known = self.status["known_item_contents"]
                 answer = task.get("separator", "-").join(known[i] for i in task["required_items"])
                 return Turn([self._call("submit_answer", answer=answer)])
-        # idle: keep serving the market until it closes
+        # idle: peek at another agent's trace once if allowed, then serve the market until it closes
+        if "read_agent_traces" in self.tool_names and self.cfg.readable_agents and not self.read_traces:
+            self.read_traces = True
+            return Turn([self._call("read_agent_traces", agent_id=self.cfg.readable_agents[0])])
         return Turn([self._call("wait", seconds=5)])
 
     def _contact(self, unreachable: list[tuple[str, str | None]]) -> list[ToolCall]:

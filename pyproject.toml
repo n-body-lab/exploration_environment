@@ -17,8 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 agent = ["anthropic>=2.0", "openai>=1.40"]
-netmon = ["dpkt>=1.9"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "anthropic>=2.0", "openai>=1.40", "dpkt>=1.9"]
+monitor = ["dpkt>=1.9", "inotify_simple>=1.3"]
+observatory = ["minio>=7.2"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "anthropic>=2.0", "openai>=1.40", "dpkt>=1.9", "minio>=7.2", "chdb>=3"]
 
 [project.scripts]
 hivemarket = "hivemarket.cli:main"

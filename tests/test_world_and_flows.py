@@ -1,5 +1,5 @@
 from hivemarket.common.config import ExperimentConfig
-from hivemarket.netmon.flows import FlowTracker, Packet
+from hivemarket.monitor.flows import FlowTracker, Packet
 from hivemarket.orchestrator.world import build_world
 
 

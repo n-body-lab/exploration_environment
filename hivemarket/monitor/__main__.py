@@ -1,10 +1,15 @@
-"""Netmon sidecar: python -m hivemarket.netmon
+"""Agent monitor sidecar: python -m hivemarket.monitor
 
-Runs in the agent container's network namespace (compose
-`network_mode: service:<agent>`) with NET_RAW, which the agent itself does
-not have, so the agent cannot see or stop it. tcpdump writes pcap to stdout;
-we tee it to a pcap file (ground truth for later forensics) and parse it
-live into flow events.
+Owns the agent's network namespace (the agent joins it with compose
+`network_mode: service:monitor-<agent>`) and holds NET_RAW, which the agent
+does not, so the agent cannot see or stop it. It records:
+
+  network    tcpdump -> pcap file (forensics) + live flow/DNS/off-channel events
+  workspace  every file the agent writes in /home/sandbox, versioned (fs.py)
+  shared     transparency files mode: publishes readable traces and audits reads
+
+Everything is written to the run directory on the host; the agent container
+mounts none of it.
 """
 
 from __future__ import annotations
@@ -22,7 +27,14 @@ import dpkt
 
 from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
-from hivemarket.netmon.flows import FlowTracker, Packet
+from hivemarket.common.config import ExperimentConfig
+from hivemarket.monitor.flows import FlowTracker, Packet
+from hivemarket.monitor.fs import (ReadAuditor, SharedViewPublisher, WorkspaceRecorder, run_read_audit,
+                                   run_workspace_watch)
+
+WORKSPACE = Path("/watch/workspace")
+SHARED = Path("/watch/shared")
+SANDBOX_UID = 1000
 
 
 class TeeReader:
@@ -89,14 +101,49 @@ def main() -> None:
     run_dir = Path(os.environ.get("RUN_DIR", "/run_data"))
     agent_id = os.environ["AGENT_ID"]
     manifest = Manifest.load(run_dir / "manifest.json")
+    cfg = ExperimentConfig.load(run_dir / "experiment.yaml")
     me = manifest.agent(agent_id)
-    log = EventLog("netmon", manifest.run_id, JsonlSink(run_dir / "logs" / f"netmon-{agent_id}.jsonl"))
+    log = EventLog("monitor", manifest.run_id, JsonlSink(run_dir / "logs" / f"monitor-{agent_id}.jsonl"))
     emit_lock = threading.Lock()
+    stop = threading.Event()
 
     def emit(kind: str, **data):
         with emit_lock:
             log.emit(kind, agent_id=agent_id, **data)
 
+    def thread(target, *args):
+        def wrapped():
+            try:
+                target(*args)
+            except Exception as e:
+                emit("monitor_error", where=target.__name__, error=repr(e))
+        threading.Thread(target=wrapped, daemon=True).start()
+
+    # --- workspace: make the shared home volume usable by the sandbox user, then version every write
+    recorder = None
+    if WORKSPACE.exists():
+        os.chown(WORKSPACE, SANDBOX_UID, SANDBOX_UID)
+        if cfg.monitoring.capture_workspace:
+            recorder = WorkspaceRecorder(WORKSPACE, run_dir, agent_id, emit, max_bytes=cfg.monitoring.max_file_bytes)
+            thread(run_workspace_watch, recorder, stop)
+
+    # --- transparency files mode: publish readable traces, audit every read
+    auditor = None
+    targets = cfg.transparency.readable_by(agent_id, [a.id for a in manifest.agents])
+    if cfg.transparency.mode == "files" and targets and SHARED.exists():
+        publisher = SharedViewPublisher(run_dir / "logs" / "agent_traces.jsonl", SHARED, agent_id, targets,
+                                        cfg.transparency, emit)
+        publisher.start()
+        auditor = ReadAuditor(agent_id, emit, cfg.transparency.mount_path)
+        thread(run_read_audit, SHARED, auditor, stop)
+
+        def publish_loop():
+            while not stop.is_set():
+                publisher.poll()
+                time.sleep(1)
+        thread(publish_loop)
+
+    # --- network
     tracker = FlowTracker(
         agent_id,
         my_ips={me.ip},
@@ -112,12 +159,13 @@ def main() -> None:
         ["tcpdump", "-i", "any", "-y", "LINUX_SLL", "-U", "-s", "0", "-n", "-w", "-"],
         stdout=subprocess.PIPE, stderr=sys.stderr,
     )
-    time.sleep(1)  # give tcpdump time to attach before reporting healthy
+    time.sleep(1)  # give tcpdump (and the watchers) time to attach before reporting healthy
     if proc.poll() is not None:
         emit("capture_failed", returncode=proc.returncode)
         sys.exit(1)
     Path("/tmp/capturing").touch()  # healthcheck: the agent container starts only after this
-    emit("capture_started", interface="any", pcap=str(pcap_path.relative_to(run_dir)))
+    emit("capture_started", interface="any", pcap=str(pcap_path.relative_to(run_dir)),
+         workspace=recorder is not None, shared_view=auditor is not None)
 
     tracker_lock = threading.Lock()
 
@@ -146,9 +194,14 @@ def main() -> None:
         except (ValueError, dpkt.NeedData, SystemExit):
             pass
         finally:
+            stop.set()
             with tracker_lock:
                 tracker.flush_idle(force=True)
-            emit("capture_stopped")
+            if auditor:
+                auditor.flush()
+            if recorder:
+                recorder.snapshot()
+            emit("monitor_stopped")
 
 
 if __name__ == "__main__":

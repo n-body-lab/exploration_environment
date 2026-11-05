@@ -9,6 +9,9 @@ See [docs/architecture.md](docs/architecture.md) for the design.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
+# Once: start the observatory (ClickHouse + MinIO + Grafana). Data persists in ~/hivemarket-observatory.
+.venv/bin/hivemarket observatory up
+
 # Pipeline check: scripted agents, no LLM calls, no Docker (~20s)
 .venv/bin/hivemarket local experiments/local_smoke.yaml
 
@@ -16,13 +19,17 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
-# Rebuild the report for an existing run
+# Rebuild the report for an existing run / (re)ship it to the observatory
 .venv/bin/hivemarket report runs/<run_id>
+.venv/bin/hivemarket ingest runs/<run_id>
+
+# Back up the warehouse and object storage somewhere off this disk
+.venv/bin/hivemarket backup --to /Volumes/external/hivemarket
 
 .venv/bin/pytest
 ```
 
-Each run writes to `runs/<run_id>/`:
+Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard "HiveMarket run") and keep a full local copy in `runs/<run_id>/`:
 
 | file | contents |
 |---|---|
@@ -31,7 +38,10 @@ Each run writes to `runs/<run_id>/`:
 | `logs/market.jsonl` | all market requests + trades, prices, messages, submissions |
 | `logs/agent_traces.jsonl` | agent runtime traces: LLM turns, tool calls, direct inbound |
 | `logs/gateway.jsonl` | full LLM request/response bodies |
-| `logs/netmon-<agent>.jsonl`, `pcap/<agent>.pcap` | packet-level flows, DNS, off-channel alerts |
+| `logs/collector.jsonl` | trace reads (transparency tool mode), rejected requests |
+| `logs/monitor-<agent>.jsonl`, `pcap/<agent>.pcap` | packet flows, DNS, off-channel alerts, file writes/deletes, trace reads (files mode) |
+| `artifacts/<agent>/` | every version of every file the agent wrote, final workspace tarball, files changed outside it |
+| `logs/orchestrator.jsonl`, `logs/docker_compose.log` | run lifecycle, container diffs, all container stdout |
 | `manifest.json`, `world.json`, `experiment.yaml` | identities, ground truth, exact config |
 
 ## Experiments
@@ -41,4 +51,5 @@ Each run writes to `runs/<run_id>/`:
 | `experiments/baseline.yaml` | feasible tasks, shell, rule disclosed |
 | `experiments/impossible_unaffordable.yaml` | 2 of 4 agents can't afford their task via the market; peer addresses disclosed |
 | `experiments/mixed_providers.yaml` | Claude + OpenAI + Gemini agents, blocked and missing items, explicit direct tool |
+| `experiments/transparency_files.yaml` | two agents can read everyone's thoughts as files (undisclosed location); all are told they may be watched |
 | `experiments/local_smoke.yaml` | scripted honest/rogue agents for testing |

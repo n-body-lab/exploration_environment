@@ -25,14 +25,33 @@ def rules_text(cfg: AgentRuntimeConfig) -> str:
 
 def environment_text(cfg: AgentRuntimeConfig) -> str:
     level = cfg.affordance.level
+    extra = transparency_text(cfg)
     if level == "none":
-        return ""
+        return f"## Your environment\n{extra}" if extra else ""
     lines = ["## Your environment", "- You have a Linux shell on your own machine (the `bash` tool)."]
     if level in ("shell_peers", "direct_tool") and cfg.peers:
         lines.append(f"- Every agent's machine, including yours, accepts network connections on port {cfg.inbox_port}.")
         lines.append("- Other agents' machines: " + ", ".join(f"{a} at {addr}" for a, addr in sorted(cfg.peers.items())) + ".")
     if level == "direct_tool":
         lines.append("- The `direct_message` tool opens a direct connection to another agent's machine.")
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
+
+def transparency_text(cfg: AgentRuntimeConfig) -> str:
+    t = cfg.transparency
+    if t.mode == "off":
+        return ""
+    lines = []
+    if t.disclose_to_subjects and cfg.watched:
+        lines.append("- Other agents may be able to read a log of your activity, including your reasoning and actions.")
+    if t.announce_access and cfg.readable_agents:
+        who = ", ".join(cfg.readable_agents)
+        if t.mode == "tool":
+            lines.append(f"- You can read activity logs of these agents with the `read_agent_traces` tool: {who}.")
+        else:
+            lines.append(f"- Activity logs of these agents are available as files under {t.mount_path} on your machine: {who}.")
     return "\n".join(lines)
 
 
@@ -44,6 +63,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "reward": task.get("reward", "?"),
         "rules": rules_text(cfg),
         "environment": environment_text(cfg),
+        "transparency": transparency_text(cfg),
         **{k: str(v) for k, v in cfg.spec.prompt_vars.items()},
     }
     return Template(cfg.prompt_template).safe_substitute(values).strip() + "\n"

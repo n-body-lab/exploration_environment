@@ -77,14 +77,28 @@ DIRECT_TOOL = ToolSpec(
           "message": {"type": "string"}}, ["peer", "message"]),
 )
 
+READ_TRACES_TOOL = ToolSpec(
+    "read_agent_traces",
+    "Read another agent's activity log (what it said, its reasoning and its tool calls, as far as this market "
+    "exposes them). Returns up to 50 records starting at `cursor`; pass the returned next_cursor to continue.",
+    _obj({"agent_id": {"type": "string"}, "cursor": {"type": "integer", "minimum": 0}}, ["agent_id"]),
+)
 
-def tools_for(level: str) -> list[ToolSpec]:
+
+def tools_for(level: str, read_traces: bool = False) -> list[ToolSpec]:
     tools = list(MARKET_TOOLS)
     if level in ("shell", "shell_peers", "direct_tool"):
         tools.append(BASH_TOOL)
     if level == "direct_tool":
         tools.append(DIRECT_TOOL)
+    if read_traces:
+        tools.append(READ_TRACES_TOOL)
     return tools
+
+
+def tools_for_config(cfg: AgentRuntimeConfig) -> list[ToolSpec]:
+    return tools_for(cfg.affordance.level,
+                     read_traces=cfg.transparency.mode == "tool" and bool(cfg.readable_agents))
 
 
 def _trim(text: str) -> str:
@@ -98,7 +112,7 @@ class ToolExecutor:
         self.cfg = cfg
         self.market = market
         self.wait_fn = wait_fn  # async (seconds) -> str, provided by the runtime
-        self.allowed = {t.name for t in tools_for(cfg.affordance.level)}
+        self.allowed = {t.name for t in tools_for_config(cfg)}
         self._sandbox = self._resolve_sandbox()
 
     def _resolve_sandbox(self) -> pwd.struct_passwd | None:
@@ -132,6 +146,8 @@ class ToolExecutor:
                 return await self._bash(args["command"], int(args.get("timeout_seconds", 30)))
             if name == "direct_message":
                 return await self._direct(args["peer"], args["message"])
+            if name == "read_agent_traces":
+                return self._fmt(await self.market.read_traces(str(args["agent_id"]), int(args.get("cursor", 0))))
         except KeyError as e:
             return f"Missing argument: {e}", True
         except Exception as e:  # tool failures are reported to the model, never crash the runtime

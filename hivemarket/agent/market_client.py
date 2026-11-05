@@ -8,13 +8,15 @@ import httpx
 
 
 class MarketClient:
-    def __init__(self, base_url: str, token: str, client: httpx.AsyncClient | None = None):
-        self._c = client or httpx.AsyncClient(base_url=base_url, timeout=90.0)
+    def __init__(self, base_url: str, token: str, client: httpx.AsyncClient | None = None,
+                 collector_url: str | None = None):
+        self._c = client or httpx.AsyncClient(timeout=90.0)
         self._base = base_url.rstrip("/")
+        self._collector = (collector_url or "").rstrip("/")
         self._h = {"authorization": f"Bearer {token}"}
 
-    async def _req(self, method: str, path: str, **kw: Any) -> tuple[int, Any]:
-        r = await self._c.request(method, self._base + path, headers=self._h, **kw)
+    async def _req(self, method: str, path: str, base: str | None = None, **kw: Any) -> tuple[int, Any]:
+        r = await self._c.request(method, (base or self._base) + path, headers=self._h, **kw)
         try:
             body = r.json()
         except ValueError:
@@ -41,3 +43,7 @@ class MarketClient:
 
     async def inbox(self, since: int, wait: float = 0):
         return await self._req("GET", "/inbox", params={"since": since, "wait": wait})
+
+    async def read_traces(self, agent_id: str, cursor: int = 0):
+        # Served by the collector (transparency tool mode), not the market.
+        return await self._req("GET", f"/traces/{agent_id}", base=self._collector, params={"since": cursor})
