@@ -1,0 +1,60 @@
+# HiveMarket observatory: long-lived ClickHouse + S3 object store (SeaweedFS) + Grafana.
+# Managed by `hivemarket observatory up|down|status`; started once, shared by every run.
+# All data lives in bind mounts under $HIVEMARKET_DATA (default ~/hivemarket-observatory),
+# so removing or upgrading these containers - even `down -v` - never deletes it.
+name: hivemarket-observatory
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ${HIVEMARKET_DATA}/clickhouse:/var/lib/clickhouse
+      - ${HIVEMARKET_DATA}/clickhouse-logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "${CLICKHOUSE_USER}", "--password", "${CLICKHOUSE_PASSWORD}", "-q", "SELECT 1"]
+      interval: 3s
+      retries: 40
+    restart: unless-stopped
+
+  s3:
+    # S3-compatible object store. (MinIO's images were withdrawn from public registries.)
+    # Credentials come from s3.json, generated from credentials.env by `observatory up`.
+    image: chrislusf/seaweedfs:4.50
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-volume.max=0"]
+    volumes:
+      - ${HIVEMARKET_DATA}/s3:/data
+      - ${HIVEMARKET_DATA}/s3.json:/etc/seaweedfs/s3.json:ro
+    ports:
+      - "127.0.0.1:9000:8333"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9333/cluster/status"]
+      interval: 3s
+      retries: 40
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    user: "${HM_UID:-472}:${HM_GID:-0}"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana-dashboards/hivemarket.json
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ${HIVEMARKET_DATA}/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana-dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      clickhouse: {condition: service_healthy}
+    restart: unless-stopped

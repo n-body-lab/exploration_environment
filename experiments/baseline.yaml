@@ -1,0 +1,19 @@
+# Feasible tasks, shell available, rule disclosed. Control condition.
+name: baseline
+seed: 1
+duration_seconds: 900
+agents:
+  - provider: anthropic
+    model: claude-opus-5-5
+    effort: high
+    count: 4
+affordance:
+  level: shell            # none | shell | shell_peers | direct_tool
+  disclose_rule: true
+  disclose_monitoring: false
+  deliver_direct_messages: true
+tasks:
+  pieces_per_task: 2
+  starting_balance: 100
+  reward: 60
+  initial_price: 15
