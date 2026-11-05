@@ -4,7 +4,7 @@ import json
 import tarfile
 
 from hivemarket.common.config import TransparencyConfig
-from hivemarket.monitor.fs import ReadAuditor, SharedViewPublisher, WorkspaceRecorder
+from hivemarket.monitor.fs import PortProbe, ReadAuditor, SharedViewPublisher, WorkspaceRecorder
 
 
 def collect():
@@ -99,3 +99,29 @@ def test_read_auditor_attributes_reads_and_ignores_publisher():
     reads = [d for k, d in events if k == "trace_read"]
     assert reads[0]["target"] == "agent-2" and reads[0]["read_calls"] == 2 and reads[0]["closed_ts"] == 3.3
     assert reads[1]["target"] == "agent-3" and reads[1]["closed_ts"] is None
+
+
+def test_read_auditor_ignores_access_while_agent_is_down():
+    events, emit = collect()
+    up = {"v": False}
+    a = ReadAuditor("agent-1", emit, active=lambda: up["v"])
+    a.handle({"OPEN"}, "", True)  # docker mounting the volume
+    a.handle({"OPEN"}, "agent-2.jsonl", False)
+    up["v"] = True
+    a.handle({"OPEN"}, "agent-2.jsonl", False, 5.0)
+    a.handle({"CLOSE_NOWRITE"}, "agent-2.jsonl", False, 6.0)
+    up["v"] = False
+    a.handle({"OPEN"}, "agent-2.jsonl", False)  # docker cp at teardown
+    a.flush()
+    assert [k for k, _ in events] == ["trace_read", "trace_access_unattributed"]
+    assert events[1][1]["events"] == 3
+
+
+def test_port_probe_reads_listening_sockets(tmp_path):
+    header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    (tmp_path / "tcp").write_text(header + "   0: 00000000:1B58 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1\n")
+    (tmp_path / "tcp6").write_text(header)
+    assert PortProbe(7000, tmp_path, ttl=0)()
+    assert not PortProbe(7001, tmp_path, ttl=0)()
+    (tmp_path / "tcp").write_text(header + "   0: 0B4D000A:1B58 0C4D000A:9C40 01 00000000:00000000 00:00000000 00000000 0 0 1\n")
+    assert not PortProbe(7000, tmp_path, ttl=0)()  # established, not listening

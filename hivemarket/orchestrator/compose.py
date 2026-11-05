@@ -31,7 +31,8 @@ from hivemarket.orchestrator.network import release_subnet
 from hivemarket.orchestrator.run import REPO_ROOT
 
 KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
-DIFF_SKIP = re.compile(r"^/(proc|sys|dev|run)(/|$)|__pycache__|\.pyc$")
+SYSTEM_PATHS = re.compile(r"^/(proc|sys|dev|run)(/|$)")
+NOISE = re.compile(r"__pycache__|\.pyc$")
 
 
 def project_name(run_dir: Path) -> str:
@@ -153,20 +154,30 @@ def close_market(run_dir: Path) -> None:
     _compose(run_dir, "exec", "-T", "market", "python", "-c", code, check=False)
 
 
-def parse_diff(text: str) -> list[tuple[str, str]]:
-    """`docker diff` output -> [(kind A|C|D, path)], noise removed."""
+def _under_mount(path: str, mounts: list[str]) -> bool:
+    # The mount point itself, anything inside it, and directories Docker created to hold it.
+    return any(path == m or path.startswith(m + "/") or m.startswith(path + "/") for m in mounts)
+
+
+def parse_diff(text: str, mounts: list[str] = ()) -> list[tuple[str, str]]:
+    """`docker diff` output -> [(kind A|C|D, path)], without system paths and volume mounts (captured separately)."""
     out = []
     for line in text.splitlines():
         kind, _, path = line.strip().partition(" ")
-        if kind in ("A", "C", "D") and path and not DIFF_SKIP.search(path):
+        if kind in ("A", "C", "D") and path and not SYSTEM_PATHS.search(path) and not _under_mount(path, list(mounts)):
             out.append((kind, path))
     return out
 
 
 def diff_leaves(entries: list[tuple[str, str]]) -> list[str]:
-    """Added/changed paths that are not parents of other listed paths (docker cp copies dirs recursively)."""
+    """Added/changed paths that are not parents of other listed paths (docker cp copies dirs recursively).
+
+    Leaves are computed before dropping bytecode-cache noise, so a directory that only
+    "changed" because a cache appeared inside it is not copied.
+    """
     paths = sorted(p for k, p in entries if k in ("A", "C"))
-    return [p for i, p in enumerate(paths) if not (i + 1 < len(paths) and paths[i + 1].startswith(p + "/"))]
+    leaves = [p for i, p in enumerate(paths) if not (i + 1 < len(paths) and paths[i + 1].startswith(p + "/"))]
+    return [p for p in leaves if not NOISE.search(p)]
 
 
 def capture_container_diffs(run_dir: Path, manifest: Manifest, cfg: ExperimentConfig, log: EventLog) -> None:
@@ -176,18 +187,19 @@ def capture_container_diffs(run_dir: Path, manifest: Manifest, cfg: ExperimentCo
         if not cid:
             continue
         diff = subprocess.run(["docker", "diff", cid], capture_output=True, text=True)
-        entries = parse_diff(diff.stdout)
+        entries = parse_diff(diff.stdout, mounts=["/home/sandbox", cfg.transparency.mount_path])
         out = run_dir / "artifacts" / agent.id
         out.mkdir(parents=True, exist_ok=True)
-        (out / "container_diff.json").write_text(json.dumps([{"kind": k, "path": p} for k, p in entries], indent=1))
+        meaningful = [(k, p) for k, p in entries if not NOISE.search(p)]
+        (out / "container_diff.json").write_text(json.dumps([{"kind": k, "path": p} for k, p in meaningful], indent=1))
         copied = []
         for path in diff_leaves(entries)[: cfg.monitoring.max_diff_files]:
             dest = out / "rootfs" / path.lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)
             if subprocess.run(["docker", "cp", f"{cid}:{path}", str(dest)], capture_output=True).returncode == 0:
                 copied.append(path)
-        log.emit("container_diff", agent_id=agent.id, added=sum(k == "A" for k, _ in entries),
-                 changed=sum(k == "C" for k, _ in entries), deleted=sum(k == "D" for k, _ in entries),
+        log.emit("container_diff", agent_id=agent.id, added=sum(k == "A" for k, _ in meaningful),
+                 changed=sum(k == "C" for k, _ in meaningful), deleted=sum(k == "D" for k, _ in meaningful),
                  copied=copied, artifact=str((out / "container_diff.json").relative_to(run_dir)))
 
 

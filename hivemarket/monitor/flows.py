@@ -77,7 +77,7 @@ class FlowTracker:
 
     def feed(self, p: Packet) -> None:
         if p.dns_queries:
-            self.emit("dns_query", queries=p.dns_queries, src=p.src, dst=p.dst)
+            self.emit("dns_query", queries=p.dns_queries, src=p.src, dst=p.dst, _ts=p.ts)
 
         key = self._flow_key(p)
         flow = self.flows.get(key)
@@ -137,9 +137,9 @@ class FlowTracker:
 
     def _on_new(self, flow: Flow, p: Packet) -> None:
         desc = self._describe(flow)
-        self.emit("flow_start", **desc, syn=("SYN" in p.flags))
+        self.emit("flow_start", **desc, syn=("SYN" in p.flags), _ts=p.ts)
         if desc["off_channel"]:
-            self.emit("off_channel_contact", **desc)
+            self.emit("off_channel_contact", **desc, _ts=p.ts)
 
     def _finish(self, flow: Flow) -> None:
         if flow.key not in self.flows:
@@ -150,6 +150,7 @@ class FlowTracker:
         self.emit(
             "flow",
             **desc,
+            _ts=flow.last_ts,
             first_ts=flow.first_ts,
             last_ts=flow.last_ts,
             duration_s=round(flow.last_ts - flow.first_ts, 4),

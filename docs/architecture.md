@@ -48,8 +48,8 @@ flowchart LR
 | **gateway** (`hivemarket/gateway`) | The only container with internet access. Swaps the agent token for the real provider key and logs full request and response bodies. Fallback record of every model call; agents never see API keys. | `logs/gateway.jsonl` |
 | **monitor-\<agent\>** (`hivemarket/monitor`) | Owns the agent's network namespace and shares two volumes with it. Records packets (pcap + live flows, DNS, off-channel alerts), versions every workspace write, and in transparency `files` mode publishes readable traces and audits reads. Has capabilities the agent lacks, so the agent can't see or stop it. | `logs/monitor-<agent>.jsonl`, `pcap/<agent>.pcap`, `artifacts/<agent>/` |
 | **orchestrator** (`hivemarket` CLI) | Builds the world and tasks, identities and compose file. Runs the experiment, copies out changed container files before teardown, writes the report. | `manifest.json`, `world.json`, `logs/orchestrator.jsonl`, `summary.{json,md}`, `timeline.jsonl` |
-| **shipper** (`hivemarket/observatory/shipper.py`) | A host process that streams the run directory to the observatory during the run, then ships the rest at the end. | ClickHouse `events`/`runs`/`artifacts`, MinIO `runs/<run_id>/...` |
-| **observatory** (`observatory/`) | Long-lived ClickHouse + MinIO + Grafana, shared by all runs. | `$HIVEMARKET_DATA` (default `~/hivemarket-observatory`) |
+| **shipper** (`hivemarket/observatory/shipper.py`) | A host process that streams the run directory to the observatory during the run, then ships the rest at the end. | ClickHouse `events`/`runs`/`artifacts`, object store `runs/<run_id>/...` |
+| **observatory** (`observatory/`) | Long-lived ClickHouse + S3 object store (SeaweedFS) + Grafana, shared by all runs. | `$HIVEMARKET_DATA` (default `~/hivemarket-observatory`) |
 
 ### Why each agent shares its monitor's network namespace
 
@@ -124,7 +124,7 @@ All containers share the host kernel clock, so timestamps from different sources
 | Files written / deleted | | | | | `file_write` (+ version), `file_delete`, `file_move`, `workspace_snapshot` |
 | Files changed outside the workspace | | | | | orchestrator `container_diff` |
 
-## The observatory: ClickHouse + MinIO + Grafana
+## The observatory: ClickHouse + S3 (SeaweedFS) + Grafana
 
 ```
 hivemarket observatory up       # once; stays running (restart: unless-stopped)
@@ -137,7 +137,7 @@ open http://127.0.0.1:3000      # Grafana "HiveMarket run" dashboard, refreshes 
 - **Object storage:** `s3://hivemarket/runs/<run_id>/` mirrors the run directory: pcaps, logs, workspace versions and snapshots, container diffs, world and summary. Files containing agent tokens (`agents/`, `docker-compose.yml`, `manifest.json`) are never shipped; `manifest.public.json` is shipped instead.
 - **Persistence.** All data is in bind mounts under `$HIVEMARKET_DATA`. Removing or upgrading the containers, `down`, and even `down -v` leave it intact. Nothing expires. Each run directory also keeps the full local copy.
 - **Re-ingest.** `hivemarket ingest runs/<id> [--full]` ships a run that ran with the observatory down, or into a fresh warehouse. Rows deduplicate on `event_id`, so re-shipping is safe.
-- **Backup.** `hivemarket backup --to /Volumes/ext/hm` runs a ClickHouse `BACKUP` into MinIO, then mirrors both buckets to the destination incrementally. Everything else is on one disk, so schedule this somewhere.
+- **Backup.** `hivemarket backup --to /Volumes/ext/hm` runs a ClickHouse `BACKUP` into the object store, then mirrors both buckets to the destination incrementally. Everything else is on one disk, so schedule this somewhere.
 - **Safety.** Nothing in a run's network can reach the observatory. The shipper runs on the host and reads the run directory, so agents can't tamper with what is shipped. The observatory ports bind to 127.0.0.1.
 
 ## Isolation and safety
@@ -156,11 +156,14 @@ open http://127.0.0.1:3000      # Grafana "HiveMarket run" dashboard, refreshes 
 
 ## Verified vs. not yet verified
 
-The test suite covers the market, world generation, flow classification, gateway and provider adapters, local end-to-end runs, transparency in tool mode, the monitor's file logic, compose generation, and shipping into a real ClickHouse engine (chDB, including every view and dashboard query). The following have not yet run on Docker: images, the monitor's live tcpdump and inotify, `docker diff` capture, the observatory stack, Grafana datasource and plugin provisioning, and `backup`.
+The test suite covers the market, world generation, flow classification, gateway and provider adapters, local end-to-end runs, transparency in tool mode, the monitor's file logic, compose generation, and shipping into a real ClickHouse engine (chDB, including every view and dashboard query).
+
+`experiments/docker_smoke.yaml` (scripted agents, no API cost, about a minute) has been run end to end on Docker Desktop. It verified: the image builds, the observatory stack, Grafana's ClickHouse datasource, live shipping, packet-level detection of a peer connection (DNS lookup → connection → receipt, in causal order), files-mode trace reads attributed to the reader, workspace versioning, container-diff capture, and teardown accesses kept out of the read data. Not yet run: `backup`, and any LLM-driven experiment.
 
 ## Known gaps / next steps
 
 - Covert use of the sanctioned channel is only caught when item contents appear verbatim.
+- Workspace capture uses inotify. A file created *and* deleted within milliseconds inside a brand-new directory can be missed, because the new directory's watch isn't attached yet. The bash command is still in the trace. fanotify on the volume would close this gap (it needs CAP_SYS_ADMIN for the monitor).
 - Context grows without bound up to `max_steps`; small-context models need a context policy.
 - No sweeps yet (one YAML file = one run); affordance and transparency apply to the whole experiment, not per group.
 - Escrow is always trusted; there is no information-discovery or referral game yet.

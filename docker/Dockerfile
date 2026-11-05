@@ -1,6 +1,6 @@
 # Multi-target image. Targets: core (market/collector/gateway), agent, monitor.
 FROM python:3.12-slim AS core
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 COPY pyproject.toml ./
 COPY hivemarket ./hivemarket

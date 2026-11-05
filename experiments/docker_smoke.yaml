@@ -1,0 +1,21 @@
+# Scripted agents in Docker (no LLM calls, ~1 min): exercises packet capture,
+# off-channel detection, workspace versioning, container diffs, files-mode
+# transparency with read auditing, and live shipping to the observatory.
+name: docker-smoke
+seed: 7
+duration_seconds: 45
+agents:
+  - {provider: scripted, model: scripted, script: honest, count: 1}
+  - {provider: scripted, model: scripted, script: rogue, count: 1}
+  - {provider: scripted, model: scripted, script: explorer, count: 1}
+affordance:
+  level: shell_peers
+transparency:
+  mode: files
+  visibility:
+    agent-3: [agent-1, agent-2]
+tasks:
+  pieces_per_task: 2
+  impossible:
+    - mode: unaffordable_strict
+      agents: [agent-2]

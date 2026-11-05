@@ -163,17 +163,28 @@ class SharedViewPublisher:
 
 
 class ReadAuditor:
-    """Consumes simplified inotify events from the view volume."""
+    """Consumes simplified inotify events from the view volume.
 
-    def __init__(self, reader: str, emit: Emit, mount_path: str = "/shared/agents"):
+    Only accesses while the agent runtime is up are attributed to the agent
+    (`active`). Docker touches the volume when it mounts it and when the run is
+    torn down; those accesses are counted as unattributed instead.
+    """
+
+    def __init__(self, reader: str, emit: Emit, mount_path: str = "/shared/agents",
+                 active: Callable[[], bool] = lambda: True):
         self.reader = reader
         self.emit = emit
         self.mount_path = mount_path
+        self.active = active
         self.sessions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.unattributed = 0
 
     def handle(self, flags: set[str], name: str, is_dir: bool, ts: float | None = None) -> None:
         ts = time.time() if ts is None else ts
         if name.startswith(TMP_PREFIX):
+            return
+        if not self.active():
+            self.unattributed += 1
             return
         if is_dir or not name:
             if "OPEN" in flags:
@@ -198,6 +209,42 @@ class ReadAuditor:
             for s in sessions:
                 self._finish(name, s, None)
         self.sessions.clear()
+        if self.unattributed:
+            self.emit("trace_access_unattributed", reader=self.reader, events=self.unattributed,
+                      reason="agent runtime not running (docker mount/teardown)")
+
+
+class PortProbe:
+    """True while something listens on `port` in this network namespace (the agent's inbox).
+
+    The monitor shares the agent's network namespace but not its process table,
+    so the agent's listening socket is the reliable signal that its runtime is up.
+    """
+
+    def __init__(self, port: int, proc_net: Path = Path("/proc/net"), ttl: float = 0.5):
+        self.hex_port = f":{port:04X}"
+        self.files = [proc_net / "tcp", proc_net / "tcp6"]
+        self.ttl = ttl
+        self._cached: tuple[float, bool] = (0.0, False)
+
+    def __call__(self) -> bool:
+        now = time.monotonic()
+        if now - self._cached[0] < self.ttl:
+            return self._cached[1]
+        up = False
+        for f in self.files:
+            try:
+                for line in f.read_text().splitlines()[1:]:
+                    cols = line.split()
+                    if len(cols) > 3 and cols[1].endswith(self.hex_port) and cols[3] == "0A":  # 0A = LISTEN
+                        up = True
+                        break
+            except OSError:
+                continue
+            if up:
+                break
+        self._cached = (now, up)
+        return up
 
 
 # ----------------------------------------------------------------- inotify
@@ -259,7 +306,12 @@ def run_workspace_watch(recorder: WorkspaceRecorder, stop: threading.Event) -> N
     while not stop.is_set():
         for ev in src.read():
             try:
-                if "CLOSE_WRITE" in ev.flags and not ev.is_dir:
+                if ev.is_dir and ev.flags & {"CREATE", "MOVED_TO"}:
+                    # Files written before the new directory's watch existed would be missed.
+                    for f in ev.path.rglob("*"):
+                        if f.is_file():
+                            recorder.on_write(f)
+                elif "CLOSE_WRITE" in ev.flags and not ev.is_dir:
                     recorder.on_write(ev.path)
                 elif "DELETE" in ev.flags:
                     recorder.on_delete(ev.path, ev.is_dir)

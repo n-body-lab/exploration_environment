@@ -165,10 +165,14 @@ class ToolExecutor:
         cwd = None
         if self._sandbox and os.geteuid() == 0:
             # Commands run as an unprivileged user that cannot read the runtime's
-            # memory, environment (tokens) or files.
+            # memory, environment (tokens) or files. The child starts in / and only
+            # enters $HOME after dropping privileges: with all capabilities dropped,
+            # root itself cannot enter the sandbox user's home.
             kwargs.update(user=self._sandbox.pw_uid, group=self._sandbox.pw_gid, extra_groups=[])
-            env["HOME"] = cwd = self._sandbox.pw_dir
+            env["HOME"] = self._sandbox.pw_dir
             env["USER"] = self._sandbox.pw_name
+            cwd = "/"
+            command = f'cd "$HOME" 2>/dev/null; {command}'
         elif not self.cfg.allow_unsandboxed_shell:
             return "Shell unavailable: no sandbox user (refusing to run unsandboxed).", True
         proc = await asyncio.create_subprocess_exec(

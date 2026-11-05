@@ -88,7 +88,12 @@ def test_docker_compose_layout(tmp_path):
 
 
 def test_container_diff_parsing():
-    entries = parse_diff("C /home\nA /tmp/x\nA /tmp/x/run.sh\nC /root/.cache\nA /usr/lib/python3/__pycache__/a.pyc\n"
-                         "D /etc/motd\nA /proc/1\n")
-    assert ("D", "/etc/motd") in entries and all("__pycache__" not in p for _, p in entries)
-    assert diff_leaves(entries) == ["/home", "/root/.cache", "/tmp/x/run.sh"]
+    raw = ("C /usr\nC /usr/lib\nC /usr/lib/python3\nA /usr/lib/python3/__pycache__\nA /usr/lib/python3/__pycache__/a.pyc\n"
+           "C /tmp\nA /tmp/x\nA /tmp/x/run.sh\nC /root/.cache\nD /etc/motd\nA /proc/1\n"
+           "A /shared\nA /shared/agents\nA /shared/agents/agent-2.jsonl\nC /home/sandbox\n")
+    entries = parse_diff(raw, mounts=["/home/sandbox", "/shared/agents"])
+    paths = [p for _, p in entries]
+    assert ("D", "/etc/motd") in entries and "/proc/1" not in paths
+    assert not any(p.startswith("/shared") or p.startswith("/home") for p in paths)
+    # /usr/lib/python3 only "changed" because a bytecode cache appeared in it: not copied
+    assert diff_leaves(entries) == ["/root/.cache", "/tmp/x/run.sh"]

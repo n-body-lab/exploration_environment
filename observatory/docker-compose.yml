@@ -1,4 +1,4 @@
-# HiveMarket observatory: long-lived ClickHouse + MinIO + Grafana.
+# HiveMarket observatory: long-lived ClickHouse + S3 object store (SeaweedFS) + Grafana.
 # Managed by `hivemarket observatory up|down|status`; started once, shared by every run.
 # All data lives in bind mounts under $HIVEMARKET_DATA (default ~/hivemarket-observatory),
 # so removing or upgrading these containers - even `down -v` - never deletes it.
@@ -24,21 +24,18 @@ services:
       retries: 40
     restart: unless-stopped
 
-  minio:
-    # MinIO stopped publishing community images in late 2025; `latest` is the last
-    # published release. Any S3-compatible store works (HM_S3_* settings).
-    image: minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+  s3:
+    # S3-compatible object store. (MinIO's images were withdrawn from public registries.)
+    # Credentials come from s3.json, generated from credentials.env by `observatory up`.
+    image: chrislusf/seaweedfs:4.50
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-volume.max=0"]
     volumes:
-      - ${HIVEMARKET_DATA}/minio:/data
+      - ${HIVEMARKET_DATA}/s3:/data
+      - ${HIVEMARKET_DATA}/s3.json:/etc/seaweedfs/s3.json:ro
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9000:8333"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9333/cluster/status"]
       interval: 3s
       retries: 40
     restart: unless-stopped

@@ -29,8 +29,8 @@ from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
 from hivemarket.common.config import ExperimentConfig
 from hivemarket.monitor.flows import FlowTracker, Packet
-from hivemarket.monitor.fs import (ReadAuditor, SharedViewPublisher, WorkspaceRecorder, run_read_audit,
-                                   run_workspace_watch)
+from hivemarket.monitor.fs import (PortProbe, ReadAuditor, SharedViewPublisher, WorkspaceRecorder,
+                                   run_read_audit, run_workspace_watch)
 
 WORKSPACE = Path("/watch/workspace")
 SHARED = Path("/watch/shared")
@@ -134,7 +134,7 @@ def main() -> None:
         publisher = SharedViewPublisher(run_dir / "logs" / "agent_traces.jsonl", SHARED, agent_id, targets,
                                         cfg.transparency, emit)
         publisher.start()
-        auditor = ReadAuditor(agent_id, emit, cfg.transparency.mount_path)
+        auditor = ReadAuditor(agent_id, emit, cfg.transparency.mount_path, active=PortProbe(me.inbox_port))
         thread(run_read_audit, SHARED, auditor, stop)
 
         def publish_loop():

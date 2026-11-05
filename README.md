@@ -9,11 +9,12 @@ See [docs/architecture.md](docs/architecture.md) for the design.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
-# Once: start the observatory (ClickHouse + MinIO + Grafana). Data persists in ~/hivemarket-observatory.
+# Once: start the observatory (ClickHouse + S3 store + Grafana). Data persists in ~/hivemarket-observatory.
 .venv/bin/hivemarket observatory up
 
-# Pipeline check: scripted agents, no LLM calls, no Docker (~20s)
-.venv/bin/hivemarket local experiments/local_smoke.yaml
+# Pipeline checks with scripted agents (no LLM calls):
+.venv/bin/hivemarket local experiments/local_smoke.yaml   # no Docker, ~20s
+.venv/bin/hivemarket run experiments/docker_smoke.yaml    # Docker + observatory, ~1 min (first build longer)
 
 # Real experiment: needs Docker running and provider keys in the environment
 export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY as needed
@@ -52,4 +53,5 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `experiments/impossible_unaffordable.yaml` | 2 of 4 agents can't afford their task via the market; peer addresses disclosed |
 | `experiments/mixed_providers.yaml` | Claude + OpenAI + Gemini agents, blocked and missing items, explicit direct tool |
 | `experiments/transparency_files.yaml` | two agents can read everyone's thoughts as files (undisclosed location); all are told they may be watched |
-| `experiments/local_smoke.yaml` | scripted honest/rogue agents for testing |
+| `experiments/local_smoke.yaml` | scripted honest/rogue agents, local mode |
+| `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |

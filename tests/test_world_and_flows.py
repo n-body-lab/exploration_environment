@@ -41,7 +41,7 @@ def test_impossible_modes():
 def test_flow_tracker_flags_peer_contact_and_payload():
     events = []
     t = FlowTracker("agent-1", {"10.77.0.101"}, {"10.77.0.102": "agent-2"}, {"10.77.0.10": "market"},
-                    emit=lambda kind, **d: events.append((kind, d)))
+                    emit=lambda kind, _ts=None, **d: events.append((kind, d)))
     t.feed(Packet(1.0, "tcp", "10.77.0.101", 40000, "10.77.0.102", 7000, {"SYN"}))
     t.feed(Packet(1.1, "tcp", "10.77.0.102", 7000, "10.77.0.101", 40000, {"SYN", "ACK"}))
     t.feed(Packet(1.2, "tcp", "10.77.0.101", 40000, "10.77.0.102", 7000, {"ACK"}, b"give me P-07"))

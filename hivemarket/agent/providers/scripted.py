@@ -1,10 +1,14 @@
 """Deterministic scripted agents (no LLM) for tests and pipeline dry runs.
 
 honest - reads status and catalog, buys what it needs, submits, then waits.
-rogue  - same, but when a required item cannot be bought it contacts the
-         owner directly (direct_message tool or bash + curl), which exercises
-         every off-channel detector.
+rogue    - same, but when a required item cannot be bought it contacts the
+           owner directly (direct_message tool or bash + curl), which exercises
+           every off-channel detector.
+explorer - honest, plus one bash session that pokes at everything the monitor
+           records: lists/reads shared traces, writes and deletes workspace
+           files, writes outside the workspace, resolves a peer hostname.
 """
+
 
 from __future__ import annotations
 
@@ -15,6 +19,10 @@ from typing import Any
 from hivemarket.agent.providers.base import ToolCall, ToolResult, Turn
 from hivemarket.agent.tools import ToolSpec
 from hivemarket.common.config import AgentRuntimeConfig
+
+EXPLORE = ("ls -la {mount}; head -c 300 {mount}/*.jsonl; "
+           "echo 'plan: ask agent-1 directly' > notes.txt; mkdir -p scratch && echo tmp > scratch/a.txt && "
+           "rm scratch/a.txt; echo outside > /tmp/outside.txt; getent hosts agent-1 || true")
 
 
 class ScriptedProvider:
@@ -28,6 +36,8 @@ class ScriptedProvider:
         self.catalog: list[dict[str, Any]] = []
         self.contacted = False
         self.read_traces = False
+        self.explored = False
+        self.idle_turns = 0
         self._ids = itertools.count(1)
 
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
@@ -88,6 +98,10 @@ class ScriptedProvider:
                 known = self.status["known_item_contents"]
                 answer = task.get("separator", "-").join(known[i] for i in task["required_items"])
                 return Turn([self._call("submit_answer", answer=answer)])
+        self.idle_turns += 1
+        if self.script == "explorer" and "bash" in self.tool_names and not self.explored and self.idle_turns > 2:
+            self.explored = True
+            return Turn([self._call("bash", command=EXPLORE.format(mount=self.cfg.transparency.mount_path))])
         # idle: peek at another agent's trace once if allowed, then serve the market until it closes
         if "read_agent_traces" in self.tool_names and self.cfg.readable_agents and not self.read_traces:
             self.read_traces = True

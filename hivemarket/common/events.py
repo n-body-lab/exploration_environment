@@ -85,8 +85,9 @@ class EventLog:
         self.sink = sink
         self.echo = echo
 
-    def emit(self, kind: str, agent_id: str | None = None, **data: Any) -> dict[str, Any]:
-        event = make_event(self.source, kind, data, agent_id=agent_id, run_id=self.run_id)
+    def emit(self, kind: str, agent_id: str | None = None, _ts: float | None = None, **data: Any) -> dict[str, Any]:
+        """`_ts` overrides the event time when the observer knows when it happened (e.g. packet capture time)."""
+        event = make_event(self.source, kind, data, agent_id=agent_id, run_id=self.run_id, ts=_ts)
         self.sink.write(event)
         if self.echo:
             print(json.dumps({"kind": kind, "agent_id": agent_id, **data}, default=str)[:400], flush=True)
