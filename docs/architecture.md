@@ -27,7 +27,7 @@ flowchart LR
   RD[("run directory<br/>on host")]
   subgraph obs["observatory (long-lived)"]
     CH[("ClickHouse<br/>events")]
-    S3[("MinIO<br/>files")]
+    S3[("S3 store (SeaweedFS)<br/>files")]
     GF["Grafana<br/>live + history"]
   end
   P[("model providers /<br/>self-hosted")]
