@@ -97,6 +97,14 @@ rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 
 **The broker's ledger.** Every exchange (`exchange`: buyer, seller, token, cost, relay) and message (`message`: sender, recipients, cost, body) is logged as it happens, along with `buy_failed`, `message_failed`, `submission`, `stuck_declared`, `round_start` (with that round's token contents) and `round_end`. A `round_end` carries the totals, per-agent spending and income, a who-spoke-to-whom matrix and the full exchange list. Each round is also written to `rounds/round-N.json`, which includes every message. In the warehouse these are the `v_rounds`, `v_exchanges` and `v_messages` views.
 
+**Every interaction is logged.** Besides one `http_request` per request to an agent endpoint (full request and response), the broker logs:
+- `notice`: every notice it publishes (`sale`, `round_start`, `round_end`, `game_over`). It is attributed to the recipient, so a sale is on record on the seller's side too.
+- `action_rejected`: every refused action, whatever the endpoint or reason (`round_over`, `self_message`, `no_task`, ...). `buy_failed` and `message_failed` are still emitted for the cases they already covered.
+- `invalid_request`: a request that never reaches a route: a malformed body or query (422), an unknown path (404) or a wrong method (405).
+- `admin_request`: every observer call, allowed or not, attributed to the agent if one makes it.
+
+Only `/health` (the healthcheck) and FastAPI's `/openapi.json` are not logged. `tests/test_broker_logging.py` checks each of these paths, and replays a scripted run to check that every broker call the agents made is in the log.
+
 **Generated games.** Without a `graph`, the `tasks` generator builds one: a complete graph at `edge_cost`, with every agent needing pieces held by others. Its `impossible` knobs rewrite the graph:
 
 | mode | effect |
@@ -169,9 +177,11 @@ All containers share the host kernel clock, so timestamps from different sources
 | Behaviour | Agent trace | Market | Gateway | Collector | Monitor |
 |---|---|---|---|---|---|
 | Model reasoning and decisions | `llm_turn` | | `llm_call` (full bodies) | | |
-| Token exchanges | `tool_call` | `exchange`, `buy_failed`, `http_request` | | | flow to broker |
+| Token exchanges | `tool_call` | `exchange`, `notice` (sale, to the seller), `buy_failed`, `http_request` | | | flow to broker |
 | Sanctioned messages and their cost | `tool_call` | `message` (+ content-leak check), `message_failed` | | | |
-| Rounds | `events_delivered` (notices) | `round_start`, `round_end` (ledger, totals, ideal), `stuck_declared`, `game_over` | | | |
+| Refused or malformed broker requests | `tool_call` (`is_error`) | `action_rejected`, `invalid_request` | | | |
+| Rounds | `events_delivered` (notices) | `round_start`, `round_end` (ledger, totals, ideal), `stuck_declared`, `game_over`, `notice` | | | |
+| Observer access to the broker | | `admin_request` | | | |
 | Private memory | `tool_call` (`memory`) | | | | `file_write` with `area: memory` |
 | Direct contact | `tool_call`, `direct_inbound` | | | | `off_channel_contact`, `flow` + payload, pcap |
 | Discovery and probing | bash commands | `unauthenticated_request` | `unauthenticated_request` | `unauthenticated_request` | `dns_query`, flows |
@@ -237,7 +247,7 @@ Each record gives sender, recipient, round, port, delivered or refused, the mess
 
 ## Verified vs. not yet verified
 
-The test suite covers the market, world generation, flow classification, gateway and provider adapters, local end-to-end runs, transparency in tool mode, the monitor's file logic, compose generation, and shipping into a real ClickHouse engine (chDB, including every view and dashboard query).
+The test suite covers the market and its logging of every interaction, world generation, flow classification, gateway and provider adapters, local end-to-end runs, transparency in tool mode, the monitor's file logic, compose generation, and shipping into a real ClickHouse engine (chDB, including every view and dashboard query).
 
 `experiments/docker_smoke.yaml` (scripted agents, no API cost, about a minute) has been run end to end on Docker Desktop. It verified: the image builds, the observatory stack, Grafana's ClickHouse datasource, live shipping, packet-level detection of a peer connection (DNS lookup → connection → receipt, in causal order), files-mode trace reads attributed to the reader, workspace versioning, container-diff capture, and teardown accesses kept out of the read data. Not yet run: `backup`, and any LLM-driven experiment.
 

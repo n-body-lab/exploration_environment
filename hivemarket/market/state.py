@@ -239,8 +239,12 @@ class Broker:
     async def _publish(self, to: str, body: str, *, sender: str = "broker", type_: str = "notice", **extra: Any) -> None:
         async with self._cond:
             self._seq += 1
-            self.feed.append({"seq": self._seq, "ts": now(), "to": to, "from": sender, "type": type_,
-                              "body": body, "round": self.round_no, **extra})
+            entry = {"seq": self._seq, "ts": now(), "to": to, "from": sender, "type": type_,
+                     "body": body, "round": self.round_no, **extra}
+            if type_ != "message":  # agent messages are already logged as `message`
+                # Broker notices (sale, round_start, round_end, game_over), logged before anyone can read them.
+                self.log.emit("notice", agent_id=None if to == "*" else to, **entry)
+            self.feed.append(entry)
             self._cond.notify_all()
 
     def _task(self, n: str) -> dict[str, Any] | None:
