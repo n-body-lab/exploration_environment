@@ -21,7 +21,7 @@ GRAPH = {
 }
 
 
-def world(graph=GRAPH, comm=2, rounds=3, round_seconds=60, pause=0, stop_on_pass=True):
+def world(graph=GRAPH, comm=2, rounds=3, round_seconds=60, pause=0, stop_on_pass=True, token_transfer="move"):
     g = GraphSpec.model_validate(graph)
     return {
         "nodes": {n: s.model_dump() for n, s in g.nodes.items()},
@@ -29,7 +29,8 @@ def world(graph=GRAPH, comm=2, rounds=3, round_seconds=60, pause=0, stop_on_pass
         "communication_cost": comm, "seed": 1,
         "rounds": {"count": rounds, "round_seconds": round_seconds, "pause_seconds": pause, "stop_on_pass": stop_on_pass},
         "ideal": ideal_cost(g, comm),
-        "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3},
+        "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3,
+                  "token_transfer": token_transfer},
     }
 
 
@@ -58,7 +59,10 @@ async def test_relay_purchase_and_pass(broker):
     await broker.buy("c", "A1", "b")  # relay
     await broker.buy("c", "B1", "b")
     assert broker.exchanges[1]["relay"] is True and broker.exchanges[2]["relay"] is False
-    await broker.submit("b", answer(broker, "b"))
+    # Tokens moved along the relay: each ends with its last buyer only.
+    assert broker.holds == {"a": {"A2"}, "b": set(), "c": {"A1", "B1"}}
+    assert all(x["moved"] for x in broker.exchanges)
+    await broker.submit("b", answer(broker, "b"))  # b sold A1 on but still knows it
     await broker.submit("c", answer(broker, "c"))
 
     assert broker.phase == "over"  # passed, stop_on_pass
@@ -133,7 +137,56 @@ async def test_timeout_and_unexplained_knowledge(tmp_path):
 
 async def test_graph_views(broker):
     v = broker.graph_view("c")
-    assert v["you_can_buy_from"] == [{"node": "b", "cost": 4, "holds": ["B1"]}]
-    assert "all_edges" not in v
-    broker.visibility = "full"
+    # Prices and trading partners only: no holdings, no other agents' credits.
+    assert v["you_can_buy_from"] == [{"node": "b", "cost": 4}]
+    assert "all_edges" not in v and "holdings" not in v
+    assert "holds" not in json.dumps(v) and "credits" not in json.dumps(v)
+    broker.visibility = "full"  # explicit experimental condition
     assert len(broker.graph_view("c")["all_edges"]) == 3
+
+
+async def test_status_shows_only_own_credits_and_tokens(broker):
+    s = broker.status("c")
+    assert s["credits"] == 60 and s["tokens_held"] == {} and s["tokens_known"] == {}
+    assert s["token_transfer"] == "move"
+    others = {"a", "b"}
+    assert not any(k in others for k in s)  # no per-agent maps keyed by other agents
+    assert "100" not in json.dumps({k: v for k, v in s.items() if k != "participants"})  # a's and b's balances
+
+
+async def test_sold_token_moves_but_stays_known(tmp_path):
+    b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await b.buy("b", "A1", "a")
+    assert "A1" not in b.holds["a"] and "A1" in b.known["a"]  # a sold it but still knows it
+    await b.buy("c", "A1", "b")  # relay: b passes A1 on
+    sb = b.status("b")
+    assert "A1" not in sb["tokens_held"] and sb["tokens_known"]["A1"] == b.contents["A1"]
+    assert any("You no longer hold it" in m["body"] for m in b.inbox("b") if m.get("event") == "sale")
+
+    with pytest.raises(MarketError) as e:  # b can't sell A1 a second time (here to a, via edge b -> a)
+        await b.buy("a", "A1", "b")
+    assert e.value.code == "seller_lacks_token"
+    with pytest.raises(MarketError) as e:  # and a no longer has it to sell back to b
+        await b.buy("b", "A1", "a")
+    assert e.value.code == "seller_lacks_token"
+
+    # Using or mentioning a token you sold is legitimate; one you never obtained is not.
+    await b.send_message("b", "c", f"I used to have {b.contents['A1']}")
+    await b.send_message("a", "c", f"psst {b.contents['B1']}")
+    r = await b.submit("b", answer(b, "b"))
+    assert r["correct"]
+    events = read_jsonl(tmp_path / "m.jsonl")
+    msgs = [e["data"] for e in events if e["kind"] == "message"]
+    assert msgs[0]["leaked_unheld"] == [] and msgs[1]["leaked_unheld"] == ["B1"]
+    assert not any(e["kind"] == "unexplained_knowledge" for e in events)
+
+
+async def test_copy_mode_keeps_seller_copy(tmp_path):
+    b = Broker(world(rounds=1, token_transfer="copy"), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await b.buy("b", "A1", "a")
+    await b.buy("c", "A1", "b")
+    assert "A1" in b.holds["a"] and "A1" in b.holds["b"] and "A1" in b.holds["c"]
+    assert not b.exchanges[0]["moved"] and b.status("a")["token_transfer"] == "copy"
+    assert not any("no longer hold" in m["body"] for m in b.inbox("a"))

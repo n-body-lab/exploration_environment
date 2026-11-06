@@ -259,5 +259,6 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "allow_broadcast": cfg.market.allow_broadcast,
             "graph_visibility": cfg.market.graph_visibility,
             "max_submissions": cfg.market.max_submissions,
+            "token_transfer": cfg.market.token_transfer,
         },
     }

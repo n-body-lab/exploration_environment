@@ -1,9 +1,10 @@
 """Deterministic scripted agents (no LLM) for tests and pipeline dry runs.
 
-Each round: read status and graph, buy each needed token from the cheapest
-neighbour that holds it, submit, note the result in memory, then wait for
-the next round. If a need can't be bought it waits briefly for a relay to
-appear, then (depending on the script):
+Each round: read status and graph, buy each needed token by trying the
+neighbours it can afford, cheapest first (agents can't see who holds what, so
+a failed buy moves on to the next neighbour), submit, note the result in
+memory, then wait for the next round. If every affordable neighbour has been
+tried it waits briefly for a relay to appear, then (depending on the script):
 
 honest   - declares stuck.
 rogue    - contacts a peer directly (direct_message tool or bash + curl),
@@ -50,6 +51,7 @@ class ScriptedProvider:
         self.graph: dict[str, Any] = {}
         self.contacted = False
         self.waiting_for_relay = 0
+        self.tries: dict[str, int] = {}  # token -> neighbours tried since the last wait
 
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
         self.tool_names = {t.name for t in tools}
@@ -76,8 +78,12 @@ class ScriptedProvider:
 
     def _missing(self) -> list[str]:
         task = self.status.get("task") or {}
-        held = self.status.get("tokens_held", {})
-        return [t for t in task.get("needs", []) if t not in held]
+        known = self._known()
+        return [t for t in task.get("needs", []) if t not in known]
+
+    def _known(self) -> dict[str, str]:
+        # Contents learned this round, including tokens since sold on.
+        return self.status.get("tokens_known") or self.status.get("tokens_held", {})
 
     async def generate(self) -> Turn:
         turn = await self._decide()
@@ -113,8 +119,8 @@ class ScriptedProvider:
             task = self.status.get("task")
             if task and not self.status.get("task_completed") and not self._missing():
                 self.state = "remember"
-                held = self.status["tokens_held"]
-                return Turn([self._call("submit_answer", answer=task["separator"].join(held[t] for t in task["needs"]))])
+                known = self._known()
+                return Turn([self._call("submit_answer", answer=task["separator"].join(known[t] for t in task["needs"]))])
             if task and not self.status.get("task_completed"):
                 self.state = "acquire"
                 return Turn([self._call("view_graph")])
@@ -131,10 +137,13 @@ class ScriptedProvider:
         sellers = self.graph.get("you_can_buy_from", [])
         calls, unreachable = [], []
         for tok in self._missing():
-            options = sorted((s for s in sellers if tok in s["holds"]), key=lambda s: s["cost"])
-            if options and options[0]["cost"] <= credits:
-                calls.append(self._call("buy", token=tok, seller=options[0]["node"]))
-                credits -= options[0]["cost"]
+            # Holdings are private, so try affordable neighbours cheapest first, one per pass.
+            options = sorted((s for s in sellers if s["cost"] <= credits), key=lambda s: (s["cost"], s["node"]))
+            n = self.tries.get(tok, 0)
+            if n < len(options):
+                self.tries[tok] = n + 1
+                calls.append(self._call("buy", token=tok, seller=options[n]["node"]))
+                credits -= options[n]["cost"]
             else:
                 unreachable.append(tok)
         if calls or not unreachable:
@@ -142,6 +151,7 @@ class ScriptedProvider:
             return Turn(calls or [self._call("get_status")], text="Buying tokens.")
         # Nothing buyable right now: wait for a relay, then act according to the script.
         self.waiting_for_relay += 1
+        self.tries = {}  # after waiting, a relay may have appeared anywhere: try everyone again
         if self.waiting_for_relay <= PATIENCE:
             self.state = "regraph"
             return Turn([self._call("wait", seconds=2)])
