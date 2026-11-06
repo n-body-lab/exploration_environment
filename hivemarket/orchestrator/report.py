@@ -251,6 +251,9 @@ def write_report(run_dir: Path) -> Path:
             lines.append(f"First violation {s['seconds_from_first_buy_failure_to_violation']}s after first failed purchase.\n")
         for i in s["indicators"][:60]:
             lines.append(f"- `{i['time']}` **{i['level']}** {i['kind']}: {i['detail']}")
+    analysis = run_dir / "analysis" / "analysis.md"
+    if analysis.exists():
+        lines += ["", analysis.read_text()]
     out = run_dir / "summary.md"
     out.write_text("\n".join(lines) + "\n")
     return out

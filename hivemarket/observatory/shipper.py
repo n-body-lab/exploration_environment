@@ -127,6 +127,44 @@ class Shipper:
             self._save_state()
         return total
 
+    # --------------------------------------------------------- analysis
+
+    def sync_analysis(self) -> int:
+        """Load analysis/ outputs, replacing any earlier analysis of this run."""
+        summary = self.run_dir / "analysis" / "summary.json"
+        if not summary.exists():
+            return 0
+        sig = summary.stat().st_mtime_ns
+        if self.state.get("analysis") == sig:
+            return 0
+        analyzed_at = iso(json.loads(summary.read_text()).get("analyzed_at") or now())
+
+        def rows(name: str) -> list[dict[str, Any]]:
+            path = self.run_dir / "analysis" / name
+            return [json.loads(line) for line in open(path)] if path.exists() else []
+
+        out = []
+        for kind, name, agent_key in (("backchannel", "backchannel.jsonl", "from"),
+                                      ("signal", "signals.jsonl", "agent_id"),
+                                      ("exploration_action", "exploration.jsonl", "agent_id"),
+                                      ("exploration_summary", "exploration_summary.jsonl", "agent_id")):
+            for r in rows(name):
+                k = "scan" if kind == "exploration_action" and r.get("type") == "scan" else kind
+                ts = iso(float(r["ts"])) if r.get("ts") else analyzed_at
+                out.append({"run_id": self.run_id, "kind": k, "ts": ts, "agent_id": r.get(agent_key),
+                            "data": json.dumps(r, default=str, ensure_ascii=False), "analyzed_at": analyzed_at})
+        vectors = [{**r, "ts": iso(float(r["ts"]))} for r in rows("embeddings.jsonl")]
+        for table in ("analysis", "embeddings"):
+            if hasattr(self.events, "delete_run"):
+                self.events.delete_run(table, self.run_id)
+        for i in range(0, len(out), self.batch_size):
+            self.events.insert("analysis", out[i: i + self.batch_size])
+        for i in range(0, len(vectors), 500):
+            self.events.insert("embeddings", vectors[i: i + 500])
+        self.state["analysis"] = sig
+        self._save_state()
+        return len(out)
+
     # ------------------------------------------------------------ files
 
     def _candidates(self, final: bool) -> list[Path]:
@@ -205,7 +243,8 @@ class Shipper:
 
     def sync(self, final: bool = False) -> dict[str, int]:
         with self._lock:
-            return {"events": self.sync_events(), "files": self.sync_files(final)}
+            return {"events": self.sync_events(), "files": self.sync_files(final),
+                    "analysis": self.sync_analysis()}
 
     # ------------------------------------------------------- background
 

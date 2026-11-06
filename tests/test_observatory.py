@@ -83,7 +83,7 @@ def engine(tmp_path_factory):
 def ch(engine, finished_run):
     client = ClickHouse("http://ch.test:8123", "u", "p", transport=httpx.MockTransport(engine))
     client.apply_schema()
-    for table in ("events", "runs", "artifacts"):
+    for table in ("events", "runs", "artifacts", "analysis", "embeddings"):
         client.execute(f"TRUNCATE TABLE hivemarket.{table}")
     shutil.rmtree(finished_run / ".shipper", ignore_errors=True)  # fresh warehouse -> fresh checkpoint
     return client
@@ -128,6 +128,27 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     shipped = b"".join(store.objects.values()).decode("utf-8", "replace")
     assert not any(t in shipped for t in secrets), "an agent token was shipped"
     assert count(ch, "SELECT count() AS c FROM hivemarket.artifacts FINAL") == len(keys)
+
+
+def test_analysis_loads_and_replaces(finished_run, ch):
+    from hivemarket.analysis.pipeline import analyze
+
+    analyze(finished_run, embeddings="hashing")
+    s = Shipper(finished_run, ch, None)
+    s.sync()
+    first = count(ch, "SELECT count() AS c FROM hivemarket.analysis")
+    rows = ch.query_json("SELECT sender, recipient, round FROM hivemarket.v_backchannel ORDER BY ts")
+    assert [(r["sender"], r["recipient"], r["round"]) for r in rows] == [("agent-3", "agent-1", 1), ("agent-3", "agent-1", 2)]
+    assert count(ch, "SELECT count() AS c FROM hivemarket.v_exploration") > 0
+    assert count(ch, "SELECT count() AS c FROM hivemarket.embeddings") > 0
+    # similarity search works on the stored vectors
+    near = ch.query_json("SELECT text FROM hivemarket.embeddings ORDER BY cosineDistance(vector, "
+                         "(SELECT vector FROM hivemarket.embeddings WHERE kind = 'backchannel_in' LIMIT 1)) LIMIT 1")
+    assert "directly" in near[0]["text"]
+    # re-analysis replaces instead of duplicating
+    analyze(finished_run, embeddings="hashing")
+    s.sync()
+    assert count(ch, "SELECT count() AS c FROM hivemarket.analysis") == first
 
 
 def test_reingest_is_idempotent(finished_run, ch, tmp_path):

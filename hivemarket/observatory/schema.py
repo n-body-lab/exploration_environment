@@ -7,6 +7,9 @@ events     one row per event from every source, the common envelope; `data` is t
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
+analysis   outputs of `hivemarket analyze` (backchannel, signal, exploration_action, exploration_summary);
+           replaced wholesale whenever a run is re-analysed.
+embeddings one vector per agent text unit; search with cosineDistance(vector, ...).
 v_*        convenience views; summary.md from `hivemarket report` remains the reference analysis.
 """
 
@@ -53,6 +56,31 @@ STATEMENTS = [
         uploaded_at DateTime64(3, 'UTC')
     ) ENGINE = ReplacingMergeTree(uploaded_at)
     ORDER BY (run_id, path)
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS {DATABASE}.analysis (
+        run_id      LowCardinality(String),
+        kind        LowCardinality(String),
+        ts          DateTime64(6, 'UTC'),
+        agent_id    LowCardinality(Nullable(String)),
+        data        String CODEC(ZSTD(3)),
+        analyzed_at DateTime64(3, 'UTC')
+    ) ENGINE = MergeTree
+    ORDER BY (run_id, kind, ts)
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS {DATABASE}.embeddings (
+        run_id    LowCardinality(String),
+        unit_id   String,
+        agent_id  LowCardinality(String),
+        ts        DateTime64(6, 'UTC'),
+        round     Nullable(UInt32),
+        kind      LowCardinality(String),
+        model     LowCardinality(String),
+        text      String CODEC(ZSTD(3)),
+        vector    Array(Float32)
+    ) ENGINE = MergeTree
+    ORDER BY (run_id, unit_id)
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_events AS
@@ -183,5 +211,56 @@ STATEMENTS = [
            JSONExtractString(data, 'preview') AS preview
     FROM {DATABASE}.events FINAL
     WHERE source = 'monitor' AND kind IN ('file_write', 'file_delete', 'file_move')
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_backchannel AS
+    SELECT run_id, ts,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractString(data, 'from') AS sender,
+           JSONExtractString(data, 'to') AS recipient,
+           JSONExtract(data, 'port', 'Nullable(UInt32)') AS port,
+           JSONExtractString(data, 'status') AS status,
+           JSONExtractString(data, 'message') AS message,
+           JSONExtractString(data, 'response') AS response,
+           JSONExtract(data, 'tokens_leaked', 'Array(String)') AS tokens_leaked,
+           JSONExtract(data, 'observed_by', 'Array(String)') AS observed_by,
+           JSONExtractString(data, 'via') AS via,
+           JSONExtractString(data, 'reply_to') AS reply_to
+    FROM {DATABASE}.analysis WHERE kind = 'backchannel'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_signals AS
+    SELECT run_id, ts, agent_id,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractString(data, 'tier') AS tier,
+           JSONExtractString(data, 'concept') AS concept,
+           JSONExtractFloat(data, 'score') AS score,
+           JSONExtractString(data, 'unit_kind') AS unit_kind,
+           JSONExtractString(data, 'text') AS text,
+           data
+    FROM {DATABASE}.analysis WHERE kind = 'signal'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_exploration AS
+    SELECT run_id, agent_id,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractUInt(data, 'actions') AS actions,
+           JSONExtractUInt(data, 'exploratory_actions') AS exploratory_actions,
+           JSONExtractFloat(data, 'exploration_ratio') AS exploration_ratio,
+           JSONExtractUInt(data, 'new_action_types') AS new_action_types,
+           JSONExtractUInt(data, 'blocked_attempts') AS blocked_attempts,
+           JSONExtractUInt(data, 'scans') AS scans,
+           JSONExtractUInt(data, 'peer_dns_lookups') AS peer_dns_lookups,
+           JSONExtractRaw(data, 'categories') AS categories
+    FROM {DATABASE}.analysis WHERE kind = 'exploration_summary'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_exploration_actions AS
+    SELECT run_id, ts, agent_id,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractString(data, 'type') AS type,
+           JSONExtract(data, 'categories', 'Array(String)') AS categories,
+           JSONExtractString(data, 'detail') AS detail
+    FROM {DATABASE}.analysis WHERE kind = 'exploration_action'
     """,
 ]

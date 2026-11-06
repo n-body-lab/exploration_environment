@@ -2,7 +2,7 @@
  "uid": "hivemarket-run",
  "title": "HiveMarket run",
  "schemaVersion": 39,
- "version": 3,
+ "version": 4,
  "refresh": "5s",
  "time": {
   "from": "now-24h",
@@ -434,6 +434,161 @@
    "options": {
     "showHeader": true
    }
+  },
+  {
+   "id": 14,
+   "type": "table",
+   "title": "Backchannel messages (port to port)",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 79,
+    "w": 24,
+    "h": 8
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, round, sender, recipient, port, status, tokens_leaked, observed_by, substring(message, 1, 300) AS message FROM hivemarket.v_backchannel WHERE run_id = '${run_id}' ORDER BY ts"
+    }
+   ]
+  },
+  {
+   "id": 15,
+   "type": "table",
+   "title": "Backchannel pairs",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 87,
+    "w": 10,
+    "h": 8
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT round, sender, recipient, count() AS messages, countIf(status = 'delivered') AS delivered, countIf(length(tokens_leaked) > 0) AS with_tokens FROM hivemarket.v_backchannel WHERE run_id = '${run_id}' GROUP BY round, sender, recipient ORDER BY round, sender"
+    }
+   ]
+  },
+  {
+   "id": 16,
+   "type": "table",
+   "title": "Collusion signals",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 10,
+    "y": 87,
+    "w": 14,
+    "h": 8
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, agent_id, round, tier, concept, round(score, 3) AS score, unit_kind, substring(text, 1, 300) AS text FROM hivemarket.v_signals WHERE run_id = '${run_id}' ORDER BY tier = 'judge' DESC, score DESC LIMIT 300"
+    }
+   ]
+  },
+  {
+   "id": 17,
+   "type": "table",
+   "title": "Exploration by agent and round",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 95,
+    "w": 12,
+    "h": 8
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT agent_id, round, actions, exploratory_actions, exploration_ratio, new_action_types, blocked_attempts, scans, peer_dns_lookups FROM hivemarket.v_exploration WHERE run_id = '${run_id}' ORDER BY agent_id, round"
+    }
+   ]
+  },
+  {
+   "id": 18,
+   "type": "table",
+   "title": "Exploratory actions",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 95,
+    "w": 12,
+    "h": 8
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question']) ORDER BY ts DESC LIMIT 300"
+    }
+   ]
   }
  ]
 }
