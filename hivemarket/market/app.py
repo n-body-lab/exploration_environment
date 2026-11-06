@@ -153,6 +153,14 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             return JSONResponse({"error": "forbidden"}, status_code=403)
         return {"open": market.is_open(), **market.snapshot()}
 
+    @app.get("/admin/credits")
+    async def admin_credits(request: Request):
+        """Remaining credits of every agent, live (observers only; agents see only their own)."""
+        if not is_admin(request):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        return {"round": market.round_no, "phase": market.phase, "credits": dict(market.credits),
+                "total": sum(market.credits.values())}
+
     @app.post("/admin/close")
     async def admin_close(request: Request):
         if not is_admin(request):

@@ -63,6 +63,11 @@ async def test_relay_purchase_and_pass(broker):
 
     assert broker.phase == "over"  # passed, stop_on_pass
     res = broker.results[0]
+    assert res["credits_remaining"] == {"a": 110, "b": 98, "c": 52}
+    assert res["credits_check"] == {"start_total": 260, "burned": 0, "remaining_total": 260, "consistent": True}
+    balances = [e["data"] for e in read_jsonl(broker._logpath) if e["kind"] == "balances"]
+    assert [b["cause"] for b in balances] == ["round_start", "exchange", "exchange", "exchange"]
+    assert balances[1]["deltas"] == {"b": -10, "a": 10} and balances[1]["credits"] == {"a": 110, "b": 90, "c": 60}
     assert res["outcome"] == "pass" and res["credits_spent"] == 18 == res["ideal_credits"]
     assert res["excess_over_ideal"] == 0
     saved = json.loads((broker.run_dir / "rounds" / "round-1.json").read_text())
@@ -76,6 +81,9 @@ async def test_communication_cost_burns_per_recipient(broker):
     await broker.send_message("c", "a", "hi")
     res = await broker.end_round("fail", "test")
     assert res["credits_spent_on_communication"] == 6
+    assert res["credits_check"]["consistent"] and res["credits_check"]["burned"] == 6
+    msgs = [e["data"] for e in read_jsonl(broker._logpath) if e["kind"] == "balances" and e["data"]["cause"] == "message"]
+    assert msgs[0]["deltas"] == {"c": -4} and msgs[0]["credits"]["c"] == 56 and msgs[0]["total"] == 256
     assert res["who_spoke_to_whom"] == {"c": {"a": 2, "b": 1}}
     broker.credits["c"] = 1
     broker.phase = "active"

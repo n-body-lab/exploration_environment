@@ -2,7 +2,7 @@
  "uid": "hivemarket-run",
  "title": "HiveMarket run",
  "schemaVersion": 39,
- "version": 2,
+ "version": 3,
  "refresh": "5s",
  "time": {
   "from": "now-24h",
@@ -60,6 +60,43 @@
    }
   },
   {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Remaining credits by agent",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 24,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "lineInterpolation": "stepAfter"
+     }
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 0,
+     "queryType": "timeseries",
+     "rawSql": "SELECT ts AS time, agent, credits FROM hivemarket.v_balances WHERE run_id = '${run_id}' ORDER BY time"
+    }
+   ],
+   "options": {}
+  },
+  {
    "id": 2,
    "type": "table",
    "title": "Agents",
@@ -69,7 +106,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 6,
+    "y": 14,
     "w": 24,
     "h": 7
    },
@@ -100,7 +137,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 13,
+    "y": 21,
     "w": 12,
     "h": 8
    },
@@ -131,7 +168,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 13,
+    "y": 21,
     "w": 12,
     "h": 8
    },
@@ -162,7 +199,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 21,
+    "y": 29,
     "w": 24,
     "h": 8
    },
@@ -193,7 +230,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 29,
+    "y": 37,
     "w": 12,
     "h": 8
    },
@@ -222,7 +259,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 29,
+    "y": 37,
     "w": 12,
     "h": 8
    },
@@ -253,7 +290,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 37,
+    "y": 45,
     "w": 24,
     "h": 8
    },
@@ -284,7 +321,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 45,
+    "y": 53,
     "w": 24,
     "h": 8
    },
@@ -315,7 +352,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 53,
+    "y": 61,
     "w": 24,
     "h": 10
    },
@@ -346,7 +383,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 63,
+    "y": 71,
     "w": 12,
     "h": 8
    },
@@ -377,7 +414,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 63,
+    "y": 71,
     "w": 12,
     "h": 8
    },

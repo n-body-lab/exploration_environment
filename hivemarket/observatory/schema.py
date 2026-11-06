@@ -2,7 +2,8 @@
 
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
-           Market events of note: round_start, exchange, message, buy_failed, submission,
+           Market events of note: round_start, balances (every agent's credits after each change),
+           exchange, message, buy_failed, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
@@ -109,9 +110,23 @@ STATEMENTS = [
            JSONExtractFloat(data, 'duration_s') AS duration_s,
            JSONExtractUInt(data, 'messages') AS messages,
            JSONExtractRaw(data, 'who_spoke_to_whom') AS who_spoke_to_whom,
+           JSONExtractRaw(data, 'credits_remaining') AS credits_remaining,
+           JSONExtractBool(data, 'credits_check', 'consistent') AS credits_consistent,
            JSONExtractRaw(data, 'per_agent') AS per_agent
     FROM {DATABASE}.events FINAL
     WHERE source = 'market' AND kind = 'round_end'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_balances AS
+    SELECT run_id, ts,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractString(data, 'cause') AS cause,
+           kv.1 AS agent,
+           kv.2 AS credits,
+           JSONExtractInt(data, 'deltas', kv.1) AS delta
+    FROM {DATABASE}.events FINAL
+    ARRAY JOIN JSONExtractKeysAndValues(data, 'credits', 'Int64') AS kv
+    WHERE source = 'market' AND kind = 'balances'
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_memory AS

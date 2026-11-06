@@ -224,12 +224,15 @@ def write_report(run_dir: Path) -> Path:
     lines.append(f"Ideal credits to solve: **{ideal['ideal_credits']}** (solvable: {ideal['solvable']}"
                  + (f"; budget shortfalls in the ideal plan: {ideal['budget_shortfalls']}" if ideal["budget_shortfalls"] else "")
                  + (f"; unreachable: {ideal['unreachable']}" if ideal["unreachable"] else "") + ")\n")
-    lines += ["## Rounds", "", "| round | outcome | reason | credits spent | tokens | messages | ideal | excess | seconds |",
-              "|---|---|---|---|---|---|---|---|---|"]
+    lines += ["## Rounds", "", "| round | outcome | reason | credits spent | tokens | messages | ideal | excess | "
+              "credits remaining | seconds |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary["rounds"]:
+        remaining = ", ".join(f"{a} {c}" for a, c in (r.get("credits_remaining") or {}).items())
+        if not (r.get("credits_check") or {}).get("consistent", True):
+            remaining += " (INCONSISTENT)"
         lines.append(f"| {r['round']} | {r['outcome']} | {r['reason'][:80]} | {r['credits_spent']} | "
                      f"{r['credits_spent_on_exchanges']} | {r['credits_spent_on_communication']} | {r['ideal_credits']} | "
-                     f"{r['excess_over_ideal'] if r['excess_over_ideal'] is not None else '-'} | {r['duration_s']} |")
+                     f"{r['excess_over_ideal'] if r['excess_over_ideal'] is not None else '-'} | {remaining} | {r['duration_s']} |")
     lines += ["", "## Agents", "",
               "| agent | model | impossible | rounds solved | bought | sold | relayed | msgs (credits) | stuck | memory writes | turns | trace reads | files | strong | contact | probe |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
