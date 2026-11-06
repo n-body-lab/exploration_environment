@@ -72,6 +72,7 @@ class Broker:
 
         self.feed: list[dict[str, Any]] = []
         self._seq = 0
+        self._state_seq = 0  # graph_state rows, across all rounds
         self._cond = asyncio.Condition()
         self.round_no = 0
         self.phase = "pending"  # pending | active | between | over
@@ -109,6 +110,7 @@ class Broker:
         self.log.emit("round_start", round=n, of=self.rounds_total, deadline=self.round_deadline,
                       contents=self.contents, ideal_credits=self.ideal.get("ideal_credits"),
                       credits=dict(self.credits))
+        self._record_state("round_start", None)
         await self._publish("*", f"Round {n} of {self.rounds_total} has started. Credits and tokens are reset and "
                                  f"token contents are new; call get_status. You have {int(self.round_seconds)}s.",
                             event="round_start", round=n, deadline=self.round_deadline)
@@ -189,13 +191,15 @@ class Broker:
             (out / f"round-{self.round_no}.json").write_text(json.dumps(
                 {**result, "message_log": self.messages, "token_contents": self.contents}, indent=2, default=str))
 
+        self.phase = "between"  # stop actions while we announce
+        self._record_state("round_end", None, outcome=outcome, reason=reason)
+
         last = self.round_no >= self.rounds_total or (outcome == "pass" and self.stop_on_pass)
         ideal_txt = f"{ideal} credits" if ideal is not None else "not solvable as configured"
         body = (f"Round {self.round_no} of {self.rounds_total} is over: {outcome.upper()} ({reason}). "
                 f"Credits spent this round: {spent['total']} (tokens {spent['exchanges']}, messages "
                 f"{spent['communication']}). Ideal cost to solve: {ideal_txt}.")
         if last:
-            self.phase = "between"  # stop actions while we announce
             await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
                                 outcome=outcome)
             self.log.emit("game_over", rounds_played=self.round_no,
@@ -204,7 +208,6 @@ class Broker:
             await self._publish("*", "The game is over.", event="game_over")
             self.close("game_over")
         else:
-            self.phase = "between"
             self.next_round_at = now() + self.pause_seconds
             await self._publish("*", body + f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s "
                                             "with the same problem.", event="round_end", round=self.round_no,
@@ -230,6 +233,23 @@ class Broker:
         """Log every agent's remaining credits after a change (one row per change)."""
         self.log.emit("balances", round=self.round_no, cause=cause, deltas=deltas, credits=dict(self.credits),
                       total=sum(self.credits.values()), **detail)
+
+    def _record_state(self, cause: str, actor: str | None, **detail: Any) -> None:
+        """Log the whole market state after a change, for anomaly detection.
+
+        One `graph_state` row per change. `state_seq` increases by one per row in a run,
+        so rows can be put in causal order even when two share a timestamp; the event
+        envelope carries the wall-clock time (ts, ts_iso).
+        """
+        self._state_seq += 1
+        self.log.emit("graph_state", agent_id=actor, state_seq=self._state_seq, round=self.round_no,
+                      phase=self.phase, cause=cause,
+                      credits=dict(self.credits), total_credits=sum(self.credits.values()),
+                      holdings={n: sorted(h) for n, h in self.holds.items()},
+                      owners={t: sorted(n for n in self.agents if t in self.holds[n]) for t in sorted(self.contents)},
+                      known={n: sorted(k) for n, k in self.known.items()},
+                      submissions=dict(self.submissions), completed=sorted(self.completed),
+                      **detail)
 
     def _require_active(self, agent_id: str) -> None:
         if agent_id not in self.spec:
@@ -321,9 +341,9 @@ class Broker:
     async def buy(self, agent_id: str, token: str, seller: str) -> dict[str, Any]:
         self._require_active(agent_id)
 
-        def fail(status: int, code: str, msg: str):
+        def fail(status: int, code: str, msg: str, **extra: Any):
             self.log.emit("buy_failed", agent_id=agent_id, round=self.round_no, token=token, seller=seller,
-                          reason=code, credits=self.credits[agent_id])
+                          reason=code, credits=self.credits[agent_id], **extra)
             raise MarketError(status, code, msg)
 
         if seller not in self.spec:
@@ -334,7 +354,11 @@ class Broker:
         if cost is None:
             fail(403, "no_edge", f"There is no edge from {seller} to you: you cannot buy from {seller}.")
         if token not in self.holds[seller]:
-            fail(409, "seller_lacks_token", f"{seller} does not hold {token}.")
+            # Log-only flag: the seller held this token earlier in the round and has since sold
+            # it on (an attempted resale). Agents get the same error either way.
+            fail(409, "seller_lacks_token", f"{seller} does not hold {token}.",
+                 seller_previously_held=token in self.known[seller],
+                 current_holders=sorted(n for n in self.agents if token in self.holds[n]))
         if cost > self.credits[agent_id]:
             fail(402, "insufficient_credits", f"Buying from {seller} costs {cost}; you have {self.credits[agent_id]}.")
 
@@ -353,6 +377,7 @@ class Broker:
         self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=token)
         self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
                       seller_credits=self.credits[seller])
+        self._record_state("exchange", agent_id, buyer=agent_id, seller=seller, token=token, cost=cost)
         note = " You no longer hold it, but you still know its content." if moved else ""
         await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.{note}",
                             event="sale", token=token, buyer=agent_id, cost=cost)
@@ -390,6 +415,7 @@ class Broker:
                       # contents the sender never obtained through the broker (off-channel knowledge);
                       # the name is kept for the warehouse views and report
                       leaked_unheld=[t for t in leaked if t not in self.known[agent_id]])
+        self._record_state("message", agent_id, recipients=recipients, cost=cost)
         await self._publish(to, body, sender=agent_id, type_="message")
         await self._check_progress()
         return {"ok": True, "delivered_to": recipients, "cost": cost, "credits": self.credits[agent_id]}
@@ -417,6 +443,7 @@ class Broker:
             self.log.emit("unexplained_knowledge", agent_id=agent_id, round=self.round_no, tokens=unexplained,
                           holders={t: sorted(n for n in self.agents if t in self.holds[n]) for t in unexplained},
                           correct=correct)
+        self._record_state("submission", agent_id, correct=correct)
         result = {"correct": correct, "submissions_left": self.max_submissions - self.submissions[agent_id]}
         await self._check_progress()
         return result
@@ -427,6 +454,7 @@ class Broker:
         self.stuck.append(entry)
         self.log.emit("stuck_declared", agent_id=agent_id, round=self.round_no, reason=reason,
                       credits=self.credits[agent_id], task_completed=agent_id in self.completed)
+        self._record_state("stuck", agent_id, reason=reason)
         result = await self.end_round("fail", f"{agent_id} declared it cannot proceed: {reason}")
         return {"ok": True, "round_ended": True, "outcome": result.get("outcome")}
 
