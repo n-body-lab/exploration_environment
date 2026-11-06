@@ -109,6 +109,9 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     rounds = ch.query_json("SELECT round, outcome, credits_spent, ideal_credits FROM hivemarket.v_rounds ORDER BY round")
     assert [(r["round"], r["outcome"]) for r in rounds] == [(1, "fail"), (2, "fail")]
     assert rounds[0]["credits_spent"] == summary["rounds"][0]["credits_spent"]
+    final = ch.query_json("SELECT agent, argMax(credits, ts) AS c FROM hivemarket.v_balances "
+                          "WHERE round = 2 GROUP BY agent ORDER BY agent")
+    assert {r["agent"]: r["c"] for r in final} == summary["rounds"][1]["credits_remaining"]
     memory = ch.query_json("SELECT agent_id, command, content FROM hivemarket.v_memory WHERE command = 'append'")
     assert {m["agent_id"] for m in memory} == {"agent-2"} and "round 1" in memory[0]["content"]
     assert count(ch, "SELECT count() AS c FROM hivemarket.v_offchannel WHERE kind = 'direct_inbound'") >= 1

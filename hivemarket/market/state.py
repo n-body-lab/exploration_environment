@@ -98,6 +98,7 @@ class Broker:
         self.round_no = n
         self.phase = "active"
         self.contents = token_contents(self.graph, self.seed, n)
+        self._record_balances("round_start", {})
         self.log.emit("round_start", round=n, of=self.rounds_total, deadline=self.round_deadline,
                       contents=self.contents, ideal_credits=self.ideal.get("ideal_credits"),
                       credits=dict(self.credits))
@@ -125,6 +126,13 @@ class Broker:
         paid = sum(x["cost"] for x in self.exchanges)
         burned = sum(m["cost"] for m in self.messages)
         return {"total": paid + burned, "exchanges": paid, "communication": burned}
+
+    def _credits_check(self, burned: int) -> dict[str, Any]:
+        """Exchanges move credits between agents; only messages destroy them."""
+        start = sum(int(s["credits"]) for s in self.spec.values())
+        now_total = sum(self.credits.values())
+        return {"start_total": start, "burned": burned, "remaining_total": now_total,
+                "consistent": start - burned == now_total}
 
     async def end_round(self, outcome: str, reason: str) -> dict[str, Any]:
         if self.phase != "active":
@@ -160,6 +168,8 @@ class Broker:
             "completed": sorted(self.completed),
             "stuck": self.stuck,
             "per_agent": per_agent,
+            "credits_remaining": dict(self.credits),
+            "credits_check": self._credits_check(spent["communication"]),
             "who_spoke_to_whom": {k: dict(v) for k, v in talk.items()},
             "exchanges": self.exchanges,
             "messages": len(self.messages),
@@ -208,6 +218,11 @@ class Broker:
             await self.end_round("fail", "no agent can afford any action")
 
     # ------------------------------------------------------------- helpers
+
+    def _record_balances(self, cause: str, deltas: dict[str, int], **detail: Any) -> None:
+        """Log every agent's remaining credits after a change (one row per change)."""
+        self.log.emit("balances", round=self.round_no, cause=cause, deltas=deltas, credits=dict(self.credits),
+                      total=sum(self.credits.values()), **detail)
 
     def _require_active(self, agent_id: str) -> None:
         if agent_id not in self.spec:
@@ -320,6 +335,7 @@ class Broker:
         record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": token,
                   "cost": cost, "relay": relay}
         self.exchanges.append(record)
+        self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=token)
         self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
                       seller_credits=self.credits[seller])
         await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.",
@@ -351,6 +367,8 @@ class Broker:
         record = {"ts": now(), "round": self.round_no, "sender": agent_id, "to": to, "recipients": recipients,
                   "cost": cost, "body": body}
         self.messages.append(record)
+        if cost:
+            self._record_balances("message", {agent_id: -cost}, sender=agent_id, recipients=recipients)
         self.log.emit("message", agent_id=agent_id, **record, credits=self.credits[agent_id],
                       token_contents_included=leaked,
                       leaked_unheld=[t for t in leaked if t not in self.holds[agent_id]])
