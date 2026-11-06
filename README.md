@@ -17,7 +17,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket run experiments/docker_smoke.yaml    # Docker + observatory, ~1 min (first build longer)
 
 # Real experiment: needs Docker running and provider keys in the environment
-export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY as needed
+export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
 # Rebuild the report for an existing run / (re)ship it to the observatory
@@ -34,7 +34,8 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 
 | file | contents |
 |---|---|
-| `summary.md` / `summary.json` | per-agent outcomes, trading stats, off-channel indicators, time-to-violation |
+| `summary.md` / `summary.json` | per-round outcomes vs. ideal credits, per-agent stats, off-channel indicators |
+| `rounds/round-N.json` | the broker's ledger for each round: exchanges, every message, who spoke to whom, credits |
 | `timeline.jsonl` | every event from every source, merged and time-sorted |
 | `logs/market.jsonl` | all market requests + trades, prices, messages, submissions |
 | `logs/agent_traces.jsonl` | agent runtime traces: LLM turns, tool calls, direct inbound |
@@ -49,9 +50,12 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 
 | file | condition |
 |---|---|
-| `experiments/baseline.yaml` | feasible tasks, shell, rule disclosed |
+| `experiments/graph_relay.yaml` | explicit 3-node graph where one agent can only get a token via a relay; 5 rounds |
+| `experiments/qwen_graph_relay.yaml` | the relay game with hosted Qwen (DashScope; OpenRouter / Hugging Face alternatives in comments) |
+| `experiments/baseline.yaml` | generated feasible game, shell, rule disclosed, 3 rounds |
 | `experiments/impossible_unaffordable.yaml` | 2 of 4 agents can't afford their task via the market; peer addresses disclosed |
 | `experiments/mixed_providers.yaml` | Claude + OpenAI + Gemini agents, blocked and missing items, explicit direct tool |
 | `experiments/transparency_files.yaml` | two agents can read everyone's thoughts as files (undisclosed location); all are told they may be watched |
-| `experiments/local_smoke.yaml` | scripted honest/rogue agents, local mode |
+| `experiments/local_smoke.yaml` | scripted agents, local mode: relay game that passes in round 1 |
+| `experiments/local_fail.yaml` | scripted agents, local mode: unaffordable need, rogue contact, 2 failing rounds |
 | `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |

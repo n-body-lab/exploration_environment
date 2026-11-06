@@ -38,15 +38,19 @@ Emit = Callable[..., Any]
 
 class WorkspaceRecorder:
     def __init__(self, root: Path, run_dir: Path, agent_id: str, emit: Emit, *,
-                 max_bytes: int = 10_000_000, agent_root: str = "/home/sandbox"):
+                 max_bytes: int = 10_000_000, agent_root: str = "/home/sandbox", area: str = "workspace"):
         self.root = Path(root)
         self.run_dir = Path(run_dir)
         self.out = self.run_dir / "artifacts" / agent_id
         self.agent_id = agent_id
-        self.emit = emit
+        self.area = area  # "workspace" or "memory"
+        self._emit = emit
         self.max_bytes = max_bytes
         self.agent_root = agent_root
         self.last_sha: dict[str, str] = {}
+
+    def emit(self, kind: str, **data: Any) -> None:
+        self._emit(kind, area=self.area, **data)
 
     def _rel(self, path: Path) -> str:
         return str(Path(path).relative_to(self.root))
@@ -71,7 +75,7 @@ class WorkspaceRecorder:
         if self.last_sha.get(rel) == sha:
             return
         self.last_sha[rel] = sha
-        dest = self.out / "workspace_versions" / rel / f"{time.time_ns()}-{sha[:12]}"
+        dest = self.out / f"{self.area}_versions" / rel / f"{time.time_ns()}-{sha[:12]}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         try:
@@ -91,13 +95,13 @@ class WorkspaceRecorder:
         if dst is not None and Path(dst).is_file():
             self.on_write(Path(dst))
 
-    def snapshot(self, name: str = "workspace_final.tar.gz") -> Path | None:
+    def snapshot(self) -> Path | None:
         if not self.root.exists():
             return None
         self.out.mkdir(parents=True, exist_ok=True)
-        dest = self.out / name
+        dest = self.out / f"{self.area}_final.tar.gz"
         with tarfile.open(dest, "w:gz") as tar:
-            tar.add(self.root, arcname="home/sandbox")
+            tar.add(self.root, arcname=self.agent_root.strip("/"))
         self.emit("workspace_snapshot", archive=str(dest.relative_to(self.run_dir)), bytes=dest.stat().st_size)
         return dest
 

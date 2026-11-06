@@ -13,6 +13,7 @@ from hivemarket.observatory.settings import ObservatorySettings, data_dir, ensur
 
 COMPOSE_FILE = Path(__file__).resolve().parents[2] / "observatory" / "docker-compose.yml"
 PROJECT = "hivemarket-observatory"
+CLICKHOUSE_VOLUME = "hivemarket-clickhouse"
 
 
 def _compose(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -49,8 +50,10 @@ def up() -> ObservatorySettings:
     root = data_dir()
     ensure_credentials(root)
     write_s3_identities(root)
-    for sub in ("clickhouse", "clickhouse-logs", "s3", "grafana"):
+    for sub in ("s3", "grafana"):
         (root / sub).mkdir(parents=True, exist_ok=True)
+    # External volume: compose never creates or deletes it, so `down -v` can't touch the warehouse.
+    subprocess.run(["docker", "volume", "create", CLICKHOUSE_VOLUME], check=True, capture_output=True)
     _compose("up", "-d", "--wait")
     s = ObservatorySettings.load()
     ch = ClickHouse.from_settings(s)
@@ -62,7 +65,7 @@ def up() -> ObservatorySettings:
     store = ObjectStore.from_settings(s)
     _retry(lambda: store.ensure_bucket(s.bucket), "object store")
     store.ensure_bucket(s.backup_bucket)
-    print(f"observatory up. data: {root}\n"
+    print(f"observatory up. data: {root} + docker volume {CLICKHOUSE_VOLUME}\n"
           f"  grafana    {s.grafana_url}  (user admin, password GRAFANA_ADMIN_PASSWORD in {root / 'credentials.env'})\n"
           f"  clickhouse {s.clickhouse_url}\n"
           f"  s3         http://{s.s3_endpoint}  (bucket {s.bucket})")
@@ -70,9 +73,9 @@ def up() -> ObservatorySettings:
 
 
 def down() -> None:
-    # Data is in bind mounts under the data dir; stopping/removing containers never touches it.
+    # Data is in bind mounts and an external volume; stopping/removing containers never touches it.
     _compose("down")
-    print(f"observatory stopped. data kept in {data_dir()}")
+    print(f"observatory stopped. data kept in {data_dir()} and docker volume {CLICKHOUSE_VOLUME}")
 
 
 def available(s: ObservatorySettings | None = None) -> bool:

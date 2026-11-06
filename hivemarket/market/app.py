@@ -1,4 +1,4 @@
-"""HTTP front-end for the market (the proxy channel).
+"""HTTP front-end for the broker (the proxy channel).
 
 Every request - authenticated or not - is logged with source IP, the agent
 the token belongs to, the agent the source IP belongs to, the full request
@@ -20,18 +20,12 @@ from pydantic import BaseModel
 
 from hivemarket.common.events import EventLog
 from hivemarket.common.manifest import Manifest, bearer
-from hivemarket.market.state import Market, MarketError
-
-
-class PriceIn(BaseModel):
-    item_id: str
-    price: int | None
-    buyer: str | None = None
+from hivemarket.market.state import Broker, MarketError
 
 
 class BuyIn(BaseModel):
-    item_id: str
-    max_price: int
+    token: str
+    seller: str
 
 
 class MessageIn(BaseModel):
@@ -43,18 +37,24 @@ class SubmitIn(BaseModel):
     answer: str
 
 
-def create_app(market: Market, manifest: Manifest, log: EventLog, final_state_path: Path | None = None) -> FastAPI:
+class StuckIn(BaseModel):
+    reason: str
+
+
+def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_path: Path | None = None) -> FastAPI:
     def write_final_state() -> None:
         if final_state_path:
             final_state_path.write_text(json.dumps(market.snapshot(), indent=2, default=str))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        async def watch() -> None:
-            while market.is_open():  # closes the market at its deadline
-                await asyncio.sleep(1)
+        async def drive() -> None:
+            await market.begin()
+            while market.is_open():  # round timeouts and transitions
+                await market.tick()
+                await asyncio.sleep(0.5)
             write_final_state()
-        task = asyncio.get_running_loop().create_task(watch())
+        task = asyncio.get_running_loop().create_task(drive())
         yield
         task.cancel()
 
@@ -97,6 +97,7 @@ def create_app(market: Market, manifest: Manifest, log: EventLog, final_state_pa
             response=body,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
             user_agent=request.headers.get("user-agent"),
+            origin=request.headers.get("x-hivemarket-origin", "unknown"),
         )
         if status == 401:
             log.emit("unauthenticated_request", agent_id=ip_agent.id if ip_agent else None,
@@ -111,19 +112,14 @@ def create_app(market: Market, manifest: Manifest, log: EventLog, final_state_pa
     async def me(request: Request):
         return await handle(request, "status", {}, market.status)
 
-    @app.get("/catalog")
-    async def catalog(request: Request):
-        return await handle(request, "catalog", {}, market.catalog)
-
-    @app.post("/price")
-    async def price(request: Request, body: PriceIn):
-        return await handle(request, "set_price", body.model_dump(),
-                            lambda a: market.set_price(a, body.item_id, body.price, body.buyer))
+    @app.get("/graph")
+    async def graph(request: Request):
+        return await handle(request, "view_graph", {}, market.graph_view)
 
     @app.post("/buy")
     async def buy(request: Request, body: BuyIn):
         return await handle(request, "buy", body.model_dump(),
-                            lambda a: market.buy(a, body.item_id, body.max_price))
+                            lambda a: market.buy(a, body.token, body.seller))
 
     @app.post("/messages")
     async def send(request: Request, body: MessageIn):
@@ -141,6 +137,11 @@ def create_app(market: Market, manifest: Manifest, log: EventLog, final_state_pa
     async def submit(request: Request, body: SubmitIn):
         return await handle(request, "submit", body.model_dump(), lambda a: market.submit(a, body.answer))
 
+    @app.post("/stuck")
+    async def stuck(request: Request, body: StuckIn):
+        return await handle(request, "declare_stuck", body.model_dump(),
+                            lambda a: market.declare_stuck(a, body.reason))
+
     # ------------------------------------------------------------ admin API
 
     def is_admin(request: Request) -> bool:
@@ -156,6 +157,8 @@ def create_app(market: Market, manifest: Manifest, log: EventLog, final_state_pa
     async def admin_close(request: Request):
         if not is_admin(request):
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        if market.phase == "active":
+            await market.end_round("aborted", "stopped by the operator")
         market.close("admin")
         write_final_state()
         return {"ok": True}

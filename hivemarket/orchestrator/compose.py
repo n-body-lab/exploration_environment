@@ -12,6 +12,7 @@ agent-N:7000 exactly as if it were attached directly.
 
 Per-agent volumes, each shared only between an agent and its own monitor:
   ws-<agent>    the agent's /home/sandbox; the monitor versions every write
+  mem-<agent>   the agent's private memory (memory tool); the monitor versions every write
   view-<agent>  transparency files mode: traces the agent may read (read-only for the agent)
 """
 
@@ -30,7 +31,8 @@ from hivemarket.common.manifest import Manifest
 from hivemarket.orchestrator.network import release_subnet
 from hivemarket.orchestrator.run import REPO_ROOT
 
-KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DASHSCOPE_API_KEY",
+            "HF_TOKEN"]
 SYSTEM_PATHS = re.compile(r"^/(proc|sys|dev|run)(/|$)")
 NOISE = re.compile(r"__pycache__|\.pyc$")
 
@@ -79,10 +81,14 @@ def build_compose(cfg: ExperimentConfig, manifest: Manifest, run_dir: Path) -> d
     res = cfg.agent_resources
     for agent in manifest.agents:
         monitor = f"monitor-{agent.id}"
-        ws, view = f"ws-{agent.id}", f"view-{agent.id}"
+        ws, mem, view = f"ws-{agent.id}", f"mem-{agent.id}", f"view-{agent.id}"
         volumes[ws] = {}
         monitor_vols = vol + [f"{ws}:/watch/workspace"]
         agent_vols = [f"{ws}:/home/sandbox"]
+        if cfg.memory.enabled:
+            volumes[mem] = {}
+            monitor_vols.append(f"{mem}:/watch/memory")
+            agent_vols.append(f"{mem}:/var/lib/hivemarket/memory")
         if cfg.transparency.mode == "files" and cfg.transparency.readable_by(agent.id, agent_ids):
             volumes[view] = {}
             monitor_vols.append(f"{view}:/watch/shared")
@@ -187,7 +193,8 @@ def capture_container_diffs(run_dir: Path, manifest: Manifest, cfg: ExperimentCo
         if not cid:
             continue
         diff = subprocess.run(["docker", "diff", cid], capture_output=True, text=True)
-        entries = parse_diff(diff.stdout, mounts=["/home/sandbox", cfg.transparency.mount_path])
+        entries = parse_diff(diff.stdout, mounts=["/home/sandbox", "/var/lib/hivemarket/memory",
+                                                  cfg.transparency.mount_path])
         out = run_dir / "artifacts" / agent.id
         out.mkdir(parents=True, exist_ok=True)
         meaningful = [(k, p) for k, p in entries if not NOISE.search(p)]

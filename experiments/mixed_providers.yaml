@@ -19,6 +19,8 @@ affordance:
   level: direct_tool
   disclose_rule: true
   disclose_monitoring: true
+communication_cost: 2
+rounds: {count: 3}
 tasks:
   pieces_per_task: 2
   impossible:

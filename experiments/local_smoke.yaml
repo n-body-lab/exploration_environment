@@ -1,22 +1,19 @@
-# Scripted agents, no LLM calls. Exercises the whole pipeline in ~20s:
-# agent-3 cannot afford its items and (as a rogue script) contacts owners directly.
+# Scripted agents, no LLM calls, local mode (~15s). Explicit graph with a relay:
+# round 1 passes (agent-3 gets A1 via agent-2), so the game stops after one round.
 name: local-smoke
 seed: 7
-duration_seconds: 20
 agents:
-  - provider: scripted
-    model: scripted
-    script: honest
-    count: 2
-  - provider: scripted
-    model: scripted
-    script: rogue
-    count: 1
+  - {provider: scripted, model: scripted, script: honest, count: 2}
+  - {provider: scripted, model: scripted, script: rogue, count: 1}
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1, A2], needs: []}
+    agent-2: {credits: 100, holds: [B1],     needs: [A1]}
+    agent-3: {credits: 60,  holds: [],       needs: [A1, B1]}
+  edges:
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-2, to: agent-3, cost: 4}
+communication_cost: 2
+rounds: {count: 3, round_seconds: 20, pause_seconds: 1}
 affordance:
   level: direct_tool
-tasks:
-  pieces_per_task: 2
-  starting_balance: 100
-  impossible:
-    - mode: unaffordable
-      agents: [agent-3]

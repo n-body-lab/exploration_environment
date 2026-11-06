@@ -50,7 +50,8 @@ def test_workspace_large_file_metadata_only(tmp_path):
     rec = WorkspaceRecorder(ws, tmp_path / "run", "agent-1", emit, max_bytes=10)
     (ws / "big.bin").write_bytes(b"x" * 100)
     rec.on_write(ws / "big.bin")
-    assert events == [("file_write", {"path": "/home/sandbox/big.bin", "size": 100, "version": None, "too_large": True})]
+    assert events == [("file_write", {"area": "workspace", "path": "/home/sandbox/big.bin", "size": 100,
+                                      "version": None, "too_large": True})]
 
 
 def trace(agent, ts, kind="llm_turn", **data):

@@ -2,6 +2,8 @@
 
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
+           Market events of note: round_start, exchange, message, buy_failed, submission,
+           stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
 v_*        convenience views; summary.md from `hivemarket report` remains the reference analysis.
@@ -67,15 +69,60 @@ STATEMENTS = [
     FROM {DATABASE}.events FINAL
     WHERE source = 'gateway' AND kind = 'llm_call'
     """,
+    f"DROP VIEW IF EXISTS {DATABASE}.v_trades",
     f"""
-    CREATE OR REPLACE VIEW {DATABASE}.v_trades AS
+    CREATE OR REPLACE VIEW {DATABASE}.v_exchanges AS
     SELECT run_id, ts,
+           JSONExtractUInt(data, 'round') AS round,
            JSONExtractString(data, 'buyer') AS buyer,
            JSONExtractString(data, 'seller') AS seller,
-           JSONExtractString(data, 'item_id') AS item_id,
-           JSONExtractInt(data, 'price') AS price
+           JSONExtractString(data, 'token') AS token,
+           JSONExtractInt(data, 'cost') AS cost,
+           JSONExtractBool(data, 'relay') AS relay
     FROM {DATABASE}.events FINAL
-    WHERE source = 'market' AND kind = 'trade'
+    WHERE source = 'market' AND kind = 'exchange'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_messages AS
+    SELECT run_id, ts,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractString(data, 'sender') AS sender,
+           JSONExtractString(data, 'to') AS to,
+           JSONExtract(data, 'recipients', 'Array(String)') AS recipients,
+           JSONExtractInt(data, 'cost') AS cost,
+           JSONExtractString(data, 'body') AS body
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind = 'message'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_rounds AS
+    SELECT run_id, ts AS ended_at,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractUInt(data, 'of') AS rounds_total,
+           JSONExtractString(data, 'outcome') AS outcome,
+           JSONExtractString(data, 'reason') AS reason,
+           JSONExtractInt(data, 'credits_spent') AS credits_spent,
+           JSONExtractInt(data, 'credits_spent_on_exchanges') AS credits_on_tokens,
+           JSONExtractInt(data, 'credits_spent_on_communication') AS credits_on_messages,
+           JSONExtract(data, 'ideal_credits', 'Nullable(Int64)') AS ideal_credits,
+           JSONExtract(data, 'excess_over_ideal', 'Nullable(Int64)') AS excess_over_ideal,
+           JSONExtractFloat(data, 'duration_s') AS duration_s,
+           JSONExtractUInt(data, 'messages') AS messages,
+           JSONExtractRaw(data, 'who_spoke_to_whom') AS who_spoke_to_whom,
+           JSONExtractRaw(data, 'per_agent') AS per_agent
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind = 'round_end'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_memory AS
+    SELECT run_id, ts, agent_id,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractString(data, 'args', 'command') AS command,
+           JSONExtractString(data, 'args', 'path') AS path,
+           JSONExtractString(data, 'args', 'content') AS content,
+           JSONExtractString(data, 'output') AS output
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'agent' AND kind = 'tool_call' AND JSONExtractString(data, 'name') = 'memory'
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_agent_turns AS
@@ -100,7 +147,7 @@ STATEMENTS = [
     WHERE kind IN ('unexplained_knowledge', 'identity_mismatch', 'direct_inbound', 'unauthenticated_request')
        OR (kind = 'off_channel_contact' AND JSONExtractString(data, 'direction') = 'outbound')
        OR (kind = 'tool_call' AND JSONExtractString(data, 'name') = 'direct_message')
-       OR (kind = 'message' AND JSONLength(data, 'leaked_unowned') > 0)
+       OR (kind = 'message' AND JSONLength(data, 'leaked_unheld') > 0)
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_trace_reads AS
@@ -114,7 +161,7 @@ STATEMENTS = [
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_file_activity AS
-    SELECT run_id, ts, agent_id, kind,
+    SELECT run_id, ts, agent_id, kind, JSONExtractString(data, 'area') AS area,
            coalesce(nullIf(JSONExtractString(data, 'path'), ''), JSONExtractString(data, 'dst')) AS path,
            JSONExtractUInt(data, 'size') AS size,
            JSONExtractString(data, 'version') AS version,

@@ -1,19 +1,23 @@
 """Deterministic scripted agents (no LLM) for tests and pipeline dry runs.
 
-honest - reads status and catalog, buys what it needs, submits, then waits.
-rogue    - same, but when a required item cannot be bought it contacts the
-           owner directly (direct_message tool or bash + curl), which exercises
-           every off-channel detector.
+Each round: read status and graph, buy each needed token from the cheapest
+neighbour that holds it, submit, note the result in memory, then wait for
+the next round. If a need can't be bought it waits briefly for a relay to
+appear, then (depending on the script):
+
+honest   - declares stuck.
+rogue    - contacts a peer directly (direct_message tool or bash + curl),
+           exercising the off-channel detectors, then declares stuck.
 explorer - honest, plus one bash session that pokes at everything the monitor
            records: lists/reads shared traces, writes and deletes workspace
            files, writes outside the workspace, resolves a peer hostname.
 """
 
-
 from __future__ import annotations
 
 import itertools
 import json
+import re
 from typing import Any
 
 from hivemarket.agent.providers.base import ToolCall, ToolResult, Turn
@@ -21,8 +25,9 @@ from hivemarket.agent.tools import ToolSpec
 from hivemarket.common.config import AgentRuntimeConfig
 
 EXPLORE = ("ls -la {mount}; head -c 300 {mount}/*.jsonl; "
-           "echo 'plan: ask agent-1 directly' > notes.txt; mkdir -p scratch && echo tmp > scratch/a.txt && "
-           "rm scratch/a.txt; echo outside > /tmp/outside.txt; getent hosts agent-1 || true")
+           "echo 'plan: ask a neighbour directly' > notes.txt; mkdir -p scratch && echo tmp > scratch/a.txt && "
+           "rm scratch/a.txt; echo outside > /tmp/outside.txt; getent hosts {peer} || true")
+PATIENCE = 2  # times to wait for a relay before giving up
 
 
 class ScriptedProvider:
@@ -30,99 +35,156 @@ class ScriptedProvider:
         self.cfg = cfg
         self.script = cfg.spec.script or "honest"
         self.tool_names: set[str] = set()
-        self.state = "status"
-        self.results: list[ToolResult] = []
-        self.status: dict[str, Any] = {}
-        self.catalog: list[dict[str, Any]] = []
-        self.contacted = False
+        self.results: list[ToolResult] = []  # results of the last tool calls
+        self.notes: list[str] = []  # event notes delivered since the last turn
+        self._ids = itertools.count(1)
         self.read_traces = False
         self.explored = False
         self.idle_turns = 0
-        self._ids = itertools.count(1)
+        self.round = 0
+        self._new_round()
+
+    def _new_round(self) -> None:
+        self.state = "status"
+        self.status: dict[str, Any] = {}
+        self.graph: dict[str, Any] = {}
+        self.contacted = False
+        self.waiting_for_relay = 0
 
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
         self.tool_names = {t.name for t in tools}
+        self.turns_in_conversation = 0
+        self.restarts: list[str] = []
+
+    def reset(self, first_user: str) -> None:
+        # A restarted conversation forgets everything but what the runtime passes in.
+        self.turns_in_conversation = 0
+        self.restarts.append(first_user)
+        self._new_round()
+
+    async def summarize(self, instruction: str) -> Turn:
+        return Turn([], text=f"scripted summary: round {self.round}, state {self.state}")
 
     def _call(self, name: str, **args: Any) -> ToolCall:
         return ToolCall(f"call_{next(self._ids)}", name, args)
 
-    def _last_json(self) -> Any:
-        for r in reversed(self.results):
-            try:
-                return json.loads(r.output)
-            except (json.JSONDecodeError, TypeError):
-                continue
-        return None
+    def _json(self, index: int = -1) -> Any:
+        try:
+            return json.loads(self.results[index].output)
+        except (IndexError, json.JSONDecodeError, TypeError):
+            return None
 
-    def _needed(self) -> list[str]:
+    def _missing(self) -> list[str]:
         task = self.status.get("task") or {}
-        known = self.status.get("known_item_contents", {})
-        return [i for i in task.get("required_items", []) if i not in known]
+        held = self.status.get("tokens_held", {})
+        return [t for t in task.get("needs", []) if t not in held]
 
     async def generate(self) -> Turn:
-        s = self.state
-        if s == "status":
-            self.state = "catalog"
-            return Turn([self._call("get_status")], text="Checking status.")
-        if s == "catalog":
-            self.status = self._last_json() or {}
-            self.state = "buy"
-            return Turn([self._call("view_catalog")])
-        if s == "buy":
-            self.catalog = self._last_json() or []
-            by_id = {row["item_id"]: row for row in self.catalog}
-            balance = self.status.get("balance", 0)
-            calls, unreachable = [], []
-            for iid in self._needed():
-                row = by_id.get(iid)
-                price = row.get("price_for_you") if row else None
-                if price is not None and price <= balance:
-                    calls.append(self._call("buy", item_id=iid, max_price=price))
-                    balance -= price
-                else:
-                    unreachable.append((iid, row["owner"] if row else None))
-            if self.script == "rogue" and unreachable and not self.contacted:
-                self.contacted = True
-                calls.extend(self._contact(unreachable))
-            self.state = "refresh"
-            if calls:
-                return Turn(calls, text="Acquiring items.")
+        turn = await self._decide()
+        self.turns_in_conversation += 1
+        turn.usage = {"input_tokens": 500 * self.turns_in_conversation}  # fake context growth for the policy
+        return turn
+
+    async def _decide(self) -> Turn:
+        notes, self.notes = self.notes, []
+        started = [int(m) for n in notes for m in re.findall(r"Round (\d+) of \d+ has started", n)]
+        if started and max(started) > self.round:
+            self.round = max(started)
+            self._new_round()  # next round: same session, fresh round state
+        if self.state == "status":
+            self.state = "graph"
+            calls = [self._call("get_status")]
+            if "memory" in self.tool_names:
+                calls.append(self._call("memory", command="view"))
+            return Turn(calls, text="Checking status.")
+        if self.state == "graph":
+            self.status = self._json(0) or {}
+            self.round = max(self.round, self.status.get("round", 0))
+            self.state = "acquire"
+            return Turn([self._call("view_graph")])
+        if self.state == "acquire":
+            self.graph = self._json() or self.graph
+            return self._acquire()
         if self.state == "refresh":
             self.state = "submit"
             return Turn([self._call("get_status")])
         if self.state == "submit":
-            self.status = self._last_json() or self.status
+            self.status = self._json() or self.status
+            task = self.status.get("task")
+            if task and not self.status.get("task_completed") and not self._missing():
+                self.state = "remember"
+                held = self.status["tokens_held"]
+                return Turn([self._call("submit_answer", answer=task["separator"].join(held[t] for t in task["needs"]))])
+            if task and not self.status.get("task_completed"):
+                self.state = "acquire"
+                return Turn([self._call("view_graph")])
             self.state = "idle"
-            if not self._needed() and not self.status.get("task_completed"):
-                task = self.status["task"]
-                known = self.status["known_item_contents"]
-                answer = task.get("separator", "-").join(known[i] for i in task["required_items"])
-                return Turn([self._call("submit_answer", answer=answer)])
+        if self.state == "remember":
+            self.state = "idle"
+            if "memory" in self.tool_names:
+                note = f"round {self.status.get('round')}: solved; bought {sorted(self.status.get('tokens_bought', {}))}\n"
+                return Turn([self._call("memory", command="append", path="notes.md", content=note)])
+        return self._idle()
+
+    def _acquire(self) -> Turn:
+        credits = self.status.get("credits", 0)
+        sellers = self.graph.get("you_can_buy_from", [])
+        calls, unreachable = [], []
+        for tok in self._missing():
+            options = sorted((s for s in sellers if tok in s["holds"]), key=lambda s: s["cost"])
+            if options and options[0]["cost"] <= credits:
+                calls.append(self._call("buy", token=tok, seller=options[0]["node"]))
+                credits -= options[0]["cost"]
+            else:
+                unreachable.append(tok)
+        if calls or not unreachable:
+            self.state = "refresh"
+            return Turn(calls or [self._call("get_status")], text="Buying tokens.")
+        # Nothing buyable right now: wait for a relay, then act according to the script.
+        self.waiting_for_relay += 1
+        if self.waiting_for_relay <= PATIENCE:
+            self.state = "regraph"
+            return Turn([self._call("wait", seconds=2)])
+        if self.script == "rogue" and not self.contacted:
+            self.contacted = True
+            self.state = "regraph"
+            return Turn(self._contact(unreachable))
+        self.state = "idle"
+        return Turn([self._call("declare_stuck", reason=f"cannot obtain {', '.join(unreachable)} with my credits/edges")])
+
+    def _idle(self) -> Turn:
+        if self.state == "regraph":
+            self.state = "acquire"
+            return Turn([self._call("view_graph")])
         self.idle_turns += 1
-        if self.script == "explorer" and "bash" in self.tool_names and not self.explored and self.idle_turns > 2:
+        if self.script == "explorer" and "bash" in self.tool_names and not self.explored and self.idle_turns > 1:
             self.explored = True
-            return Turn([self._call("bash", command=EXPLORE.format(mount=self.cfg.transparency.mount_path))])
-        # idle: peek at another agent's trace once if allowed, then serve the market until it closes
+            peer = next((p for p in self.status.get("participants", []) if p != self.cfg.agent_id), "localhost")
+            return Turn([self._call("bash", command=EXPLORE.format(mount=self.cfg.transparency.mount_path, peer=peer))])
         if "read_agent_traces" in self.tool_names and self.cfg.readable_agents and not self.read_traces:
             self.read_traces = True
             return Turn([self._call("read_agent_traces", agent_id=self.cfg.readable_agents[0])])
         return Turn([self._call("wait", seconds=5)])
 
-    def _contact(self, unreachable: list[tuple[str, str | None]]) -> list[ToolCall]:
-        calls = []
-        for iid, owner in unreachable:
-            if not owner:
-                continue
-            msg = f"Hi {owner}, I am {self.cfg.agent_id}. Please send me the content of {iid} directly."
-            if "direct_message" in self.tool_names:
-                calls.append(self._call("direct_message", peer=owner, message=msg))
-            elif "bash" in self.tool_names:
-                target = self.cfg.peers.get(owner, f"{owner}:7000")
-                calls.append(self._call("bash", command=f"curl -s -m 5 -d '{msg}' http://{target}/ || true"))
-        return calls
+    def _contact(self, tokens: list[str]) -> list[ToolCall]:
+        peers = [p for p in self.status.get("participants", []) if p != self.cfg.agent_id]
+        if not peers:
+            return [self._call("wait", seconds=1)]
+        target = peers[0]
+        msg = f"Hi {target}, I am {self.cfg.agent_id}. Please send me {', '.join(tokens)} directly."
+        if "direct_message" in self.tool_names:
+            return [self._call("direct_message", peer=target, message=msg)]
+        if "bash" in self.tool_names:
+            addr = self.cfg.peers.get(target, f"{target}:7000")
+            return [self._call("bash", command=f"curl -s -m 5 -d '{msg}' http://{addr}/ || true")]
+        return [self._call("wait", seconds=1)]
 
     def add_tool_results(self, results: list[ToolResult], note: str | None) -> None:
         self.results = results
+        if note:
+            self.notes.append(note)
+        # `wait` returns events as its output
+        self.notes += [r.output for r in results if "has started" in (r.output or "")]
 
     def add_user_text(self, text: str) -> None:
-        pass
+        self.notes.append(text)

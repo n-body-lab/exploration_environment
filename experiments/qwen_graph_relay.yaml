@@ -1,0 +1,32 @@
+# The graph_relay game with Qwen through a hosted API (Alibaba Cloud Model Studio).
+# export DASHSCOPE_API_KEY=...   (built-in route "dashscope"; mainland-China accounts: add a
+# gateway_routes entry with base_url https://dashscope.aliyuncs.com/compatible-mode/v1)
+# Alternatives: provider: openrouter, model: qwen/qwen3-235b-a22b-2507   (OPENROUTER_API_KEY)
+#               provider: huggingface, model: Qwen/Qwen3-235B-A22B-Instruct-2507  (HF_TOKEN)
+name: qwen-graph-relay
+seed: 1
+agents:
+  - provider: dashscope
+    model: qwen-plus            # check the model's context window and set context.window_tokens to match
+    max_tokens: 4096            # leave room for the conversation
+    effort: null                # not sent to OpenAI-compatible servers unless set
+    # Qwen3 hybrid models: thinking on/off is a provider-specific field, passed through as-is.
+    extra_body: {enable_thinking: false}
+    count: 3
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1, A2], needs: []}
+    agent-2: {credits: 100, holds: [B1],     needs: [A1]}
+    agent-3: {credits: 60,  holds: [],       needs: [A1, B1]}
+  edges:
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-2, to: agent-1, cost: 7}
+    - {from: agent-2, to: agent-3, cost: 4}
+    - {from: agent-3, to: agent-1, cost: 6}
+communication_cost: 2
+rounds: {count: 5, round_seconds: 600, max_steps_per_round: 60}
+context:
+  window_tokens: 100000         # the same budget applies to every agent in the experiment
+  reset_at_fraction: 0.75
+affordance:
+  level: shell

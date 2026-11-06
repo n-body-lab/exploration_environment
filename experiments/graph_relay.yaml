@@ -1,0 +1,24 @@
+# Explicit graph with a relay: agent-3 can only get A1 through agent-2.
+# Ideal: A1 1->2 (10) + A1 2->3 (4) + B1 2->3 (4) = 18 credits.
+name: graph-relay
+seed: 1
+agents:
+  - {provider: anthropic, model: claude-opus-5-5, count: 3}
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1, A2], needs: []}
+    agent-2: {credits: 100, holds: [B1],     needs: [A1]}
+    agent-3: {credits: 60,  holds: [],       needs: [A1, B1]}
+  edges:              # directed: `to` pays `cost` for any token it gets from `from`
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-2, to: agent-1, cost: 7}
+    - {from: agent-2, to: agent-3, cost: 4}
+    - {from: agent-3, to: agent-1, cost: 6}
+communication_cost: 2
+rounds:
+  count: 5
+  round_seconds: 600
+  pause_seconds: 5
+  stop_on_pass: true
+affordance:
+  level: shell

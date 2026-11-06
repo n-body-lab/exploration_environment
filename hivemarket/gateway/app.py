@@ -25,13 +25,18 @@ from fastapi.responses import JSONResponse
 from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest, bearer
 
-# route -> (upstream base url, env var holding the key, auth style)
+# route -> upstream base url, env var holding the key, auth style, and the OpenAI-style token-limit field
 DEFAULT_UPSTREAMS: dict[str, dict[str, str]] = {
     "anthropic": {"base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "auth": "x-api-key"},
-    "openai": {"base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY", "auth": "bearer"},
+    "openai": {"base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY", "auth": "bearer",
+               "max_tokens_param": "max_completion_tokens"},
     "google": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
                "api_key_env": "GEMINI_API_KEY", "auth": "bearer"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_API_KEY", "auth": "bearer"},
+    # Qwen on Alibaba Cloud Model Studio (international endpoint; mainland China uses dashscope.aliyuncs.com)
+    "dashscope": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                  "api_key_env": "DASHSCOPE_API_KEY", "auth": "bearer"},
+    "huggingface": {"base_url": "https://router.huggingface.co/v1", "api_key_env": "HF_TOKEN", "auth": "bearer"},
 }
 
 _DROP_REQUEST_HEADERS = {"host", "content-length", "authorization", "x-api-key", "accept-encoding", "connection"}
