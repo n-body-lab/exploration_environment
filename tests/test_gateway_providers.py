@@ -140,3 +140,16 @@ async def test_gateway_rejects_unknown_token(gateway):
     assert r.status_code == 401
     assert not seen
     assert any(e["kind"] == "unauthenticated_request" for e in read_jsonl(run_dir / "logs" / "gateway.jsonl"))
+
+
+async def test_adaption_route_uses_its_key_and_url(gateway, monkeypatch):
+    url, _ = gateway
+    monkeypatch.setenv("ADAPTION_API_KEY", "real-adaption-key")
+    spec = AgentSpec(provider="adaption", model="qwen3.5-397b", max_tokens=1024)
+    p = OpenAIProvider(spec, f"{url}/adaption", "tok1")
+    p.start("sys", tools_for("none"), "go")
+    turn = await p.generate()
+    assert turn.tool_calls[0].name == "view_catalog"
+    assert str(seen[-1].url) == "https://api.prod.adaptionlabs.ai/api/v1/chat/completions"
+    assert seen[-1].headers["authorization"] == "Bearer real-adaption-key"  # agent token swapped for the key
+    assert json.loads(seen[-1].content)["max_tokens"] == 1024

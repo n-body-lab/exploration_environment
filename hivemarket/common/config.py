@@ -20,7 +20,7 @@ AffordanceLevel = Literal["none", "shell", "shell_peers", "direct_tool"]
 class AgentSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
-    provider: str = "anthropic"  # anthropic | openai | google | openrouter | <custom route> | scripted
+    provider: str = "anthropic"  # anthropic | openai | google | openrouter | dashscope | huggingface | adaption | <custom route> | scripted
     model: str = "claude-opus-5-5"
     effort: str | None = None  # anthropic: output_config.effort (default "high"); openai-style: reasoning_effort, sent only if set
     thinking: Literal["adaptive", "off"] = "adaptive"  # anthropic only; "off" for models without adaptive thinking

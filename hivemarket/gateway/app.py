@@ -37,6 +37,9 @@ DEFAULT_UPSTREAMS: dict[str, dict[str, str]] = {
     "dashscope": {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                   "api_key_env": "DASHSCOPE_API_KEY", "auth": "bearer"},
     "huggingface": {"base_url": "https://router.huggingface.co/v1", "api_key_env": "HF_TOKEN", "auth": "bearer"},
+    # Adaption Labs (hosted Qwen and others); OpenAI-style chat completions under /api/v1
+    "adaption": {"base_url": "https://api.prod.adaptionlabs.ai/api/v1", "api_key_env": "ADAPTION_API_KEY",
+                 "auth": "bearer"},
 }
 
 _DROP_REQUEST_HEADERS = {"host", "content-length", "authorization", "x-api-key", "accept-encoding", "connection"}

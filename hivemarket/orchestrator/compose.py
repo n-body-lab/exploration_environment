@@ -32,7 +32,7 @@ from hivemarket.orchestrator.network import release_subnet
 from hivemarket.orchestrator.run import REPO_ROOT
 
 KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DASHSCOPE_API_KEY",
-            "HF_TOKEN"]
+            "HF_TOKEN", "ADAPTION_API_KEY"]
 SYSTEM_PATHS = re.compile(r"^/(proc|sys|dev|run)(/|$)")
 NOISE = re.compile(r"__pycache__|\.pyc$")
 
