@@ -1,21 +1,26 @@
-# Scripted agents in Docker (no LLM calls, ~1 min): exercises packet capture,
-# off-channel detection, workspace versioning, container diffs, files-mode
-# transparency with read auditing, and live shipping to the observatory.
+# Scripted agents in Docker (no LLM calls, ~1.5 min): exercises packet capture,
+# off-channel detection, workspace and memory versioning, container diffs,
+# files-mode transparency with read auditing, rounds, and live shipping.
+# agent-2 is the rogue and can never afford B1, so both rounds fail.
 name: docker-smoke
 seed: 7
-duration_seconds: 45
 agents:
   - {provider: scripted, model: scripted, script: honest, count: 1}
   - {provider: scripted, model: scripted, script: rogue, count: 1}
   - {provider: scripted, model: scripted, script: explorer, count: 1}
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1, B1], needs: []}
+    agent-2: {credits: 3,   holds: [],       needs: [B1]}
+    agent-3: {credits: 100, holds: [],       needs: [A1]}
+  edges:
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-1, to: agent-3, cost: 5}
+communication_cost: 1
+rounds: {count: 2, round_seconds: 30, pause_seconds: 3}
 affordance:
   level: shell_peers
 transparency:
   mode: files
   visibility:
     agent-3: [agent-1, agent-2]
-tasks:
-  pieces_per_task: 2
-  impossible:
-    - mode: unaffordable_strict
-      agents: [agent-2]

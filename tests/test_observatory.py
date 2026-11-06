@@ -68,7 +68,7 @@ def finished_run(tmp_path_factory):
     import asyncio
 
     tmp = tmp_path_factory.mktemp("runs")
-    run_dir = create_run(ROOT / "experiments" / "local_smoke.yaml", tmp, mode="local", local_base_port=19600)
+    run_dir = create_run(ROOT / "experiments" / "local_fail.yaml", tmp, mode="local", local_base_port=19600)
     asyncio.run(run_local(run_dir))
     write_report(run_dir)
     return run_dir
@@ -103,9 +103,14 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     assert result["events"] == lines
     assert count(ch, "SELECT count() AS c FROM hivemarket.v_events") == lines
 
-    # same trades as the local report
+    # same exchanges and rounds as the local report
     summary = analyze(finished_run)
-    assert count(ch, "SELECT count() AS c FROM hivemarket.v_trades") == sum(a["bought"] for a in summary["agents"].values())
+    assert count(ch, "SELECT count() AS c FROM hivemarket.v_exchanges") == sum(a["bought"] for a in summary["agents"].values())
+    rounds = ch.query_json("SELECT round, outcome, credits_spent, ideal_credits FROM hivemarket.v_rounds ORDER BY round")
+    assert [(r["round"], r["outcome"]) for r in rounds] == [(1, "fail"), (2, "fail")]
+    assert rounds[0]["credits_spent"] == summary["rounds"][0]["credits_spent"]
+    memory = ch.query_json("SELECT agent_id, command, content FROM hivemarket.v_memory WHERE command = 'append'")
+    assert {m["agent_id"] for m in memory} == {"agent-2"} and "round 1" in memory[0]["content"]
     assert count(ch, "SELECT count() AS c FROM hivemarket.v_offchannel WHERE kind = 'direct_inbound'") >= 1
 
     run = ch.query_json("SELECT * FROM hivemarket.runs FINAL")[0]

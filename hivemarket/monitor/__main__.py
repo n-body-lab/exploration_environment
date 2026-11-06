@@ -33,6 +33,7 @@ from hivemarket.monitor.fs import (PortProbe, ReadAuditor, SharedViewPublisher, 
                                    run_read_audit, run_workspace_watch)
 
 WORKSPACE = Path("/watch/workspace")
+MEMORY = Path("/watch/memory")
 SHARED = Path("/watch/shared")
 SANDBOX_UID = 1000
 
@@ -127,6 +128,13 @@ def main() -> None:
             recorder = WorkspaceRecorder(WORKSPACE, run_dir, agent_id, emit, max_bytes=cfg.monitoring.max_file_bytes)
             thread(run_workspace_watch, recorder, stop)
 
+    # --- private memory: same versioning, its own volume (never shared with other agents)
+    memory = None
+    if MEMORY.exists():
+        memory = WorkspaceRecorder(MEMORY, run_dir, agent_id, emit, max_bytes=cfg.monitoring.max_file_bytes,
+                                   agent_root="/var/lib/hivemarket/memory", area="memory")
+        thread(run_workspace_watch, memory, stop)
+
     # --- transparency files mode: publish readable traces, audit every read
     auditor = None
     targets = cfg.transparency.readable_by(agent_id, [a.id for a in manifest.agents])
@@ -199,8 +207,9 @@ def main() -> None:
                 tracker.flush_idle(force=True)
             if auditor:
                 auditor.flush()
-            if recorder:
-                recorder.snapshot()
+            for r in (recorder, memory):
+                if r:
+                    r.snapshot()
             emit("monitor_stopped")
 
 

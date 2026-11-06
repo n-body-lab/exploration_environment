@@ -83,4 +83,8 @@ class AnthropicProvider:
         self.messages.append({"role": "user", "content": content})
 
     def add_user_text(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": text})
+        last = self.messages[-1] if self.messages else None
+        if last and last["role"] == "user" and isinstance(last["content"], list):
+            last["content"].append({"type": "text", "text": text})  # keep roles alternating
+        else:
+            self.messages.append({"role": "user", "content": text})

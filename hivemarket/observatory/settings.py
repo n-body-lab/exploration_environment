@@ -3,7 +3,8 @@
 Data and credentials live in $HIVEMARKET_DATA (default ~/hivemarket-observatory):
   credentials.env   generated once, chmod 600; also the observatory compose env file
   s3.json           object-store identities, generated from credentials.env
-  clickhouse/ s3/ grafana/   service data (bind mounts, survive container removal)
+  s3/ grafana/      service data (bind mounts, survive container removal)
+ClickHouse data lives in the external Docker volume `hivemarket-clickhouse`.
 Environment variables HM_* override anything (e.g. a remote observatory).
 """
 

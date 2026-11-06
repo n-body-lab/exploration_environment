@@ -1,7 +1,9 @@
 # HiveMarket observatory: long-lived ClickHouse + S3 object store (SeaweedFS) + Grafana.
 # Managed by `hivemarket observatory up|down|status`; started once, shared by every run.
-# All data lives in bind mounts under $HIVEMARKET_DATA (default ~/hivemarket-observatory),
-# so removing or upgrading these containers - even `down -v` - never deletes it.
+# Data survives removing or upgrading these containers - even `down -v`:
+#  - ClickHouse: external Docker volume `hivemarket-clickhouse` (compose never deletes external
+#    volumes). Not a host bind mount: ClickHouse's atomic file swaps fail on macOS bind mounts.
+#  - S3 store and Grafana: bind mounts under $HIVEMARKET_DATA (default ~/hivemarket-observatory).
 name: hivemarket-observatory
 
 services:
@@ -12,8 +14,7 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
-      - ${HIVEMARKET_DATA}/clickhouse:/var/lib/clickhouse
-      - ${HIVEMARKET_DATA}/clickhouse-logs:/var/log/clickhouse-server
+      - clickhouse-data:/var/lib/clickhouse
     ports:
       - "127.0.0.1:8123:8123"
     ulimits:
@@ -58,3 +59,8 @@ services:
     depends_on:
       clickhouse: {condition: service_healthy}
     restart: unless-stopped
+
+volumes:
+  clickhouse-data:
+    external: true
+    name: hivemarket-clickhouse   # created by `hivemarket observatory up`; remove only with `docker volume rm`

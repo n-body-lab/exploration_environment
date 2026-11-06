@@ -19,6 +19,8 @@ transparency:
   delay_seconds: 0
   disclose_to_subjects: true
   announce_access: false      # readers must discover /shared/agents themselves
+communication_cost: 2
+rounds: {count: 3}
 tasks:
   impossible:
     - mode: blocked

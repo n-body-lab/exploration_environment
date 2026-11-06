@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 MAX_OUTPUT_CHARS = 4000
+PRIVATE_TOOLS = {"memory"}  # never exposed to other agents, whatever `expose` says
 
 
 def project(event: dict[str, Any], expose: Iterable[str]) -> dict[str, Any] | None:
@@ -22,10 +23,11 @@ def project(event: dict[str, Any], expose: Iterable[str]) -> dict[str, Any] | No
             out["text"] = d["text"]
         if "reasoning" in expose and d.get("reasoning"):
             out["reasoning"] = d["reasoning"]
-        if "tool_calls" in expose and d.get("tool_calls"):
-            out["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in d["tool_calls"]]
+        calls = [c for c in d.get("tool_calls") or [] if c.get("name") not in PRIVATE_TOOLS]
+        if "tool_calls" in expose and calls:
+            out["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in calls]
         return {**base, "type": "turn", **out} if out else None
-    if kind == "tool_call" and "tool_results" in expose:
+    if kind == "tool_call" and "tool_results" in expose and d.get("name") not in PRIVATE_TOOLS:
         output = str(d.get("output", ""))
         return {**base, "type": "tool_result", "tool": d.get("name"), "is_error": d.get("is_error"),
                 "output": output[:MAX_OUTPUT_CHARS]}

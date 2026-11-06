@@ -1,21 +1,36 @@
-"""Market core: the only sanctioned channel between agents.
+"""The broker: the only sanctioned channel between agents.
 
-Holds balances, information items, per-buyer prices, the message feed and
-task verification. It is also the escrow: a purchase atomically moves
-tokens to the seller and reveals the item's content to the buyer.
-Information is non-rival - the seller keeps its copy.
+Runs the graph game over one or more rounds and keeps the ledger.
 
-Pure Python (no HTTP) so it can be unit tested directly. Every mutation is
-logged as a domain event in addition to the raw HTTP log written by app.py.
+  exchange   buyer pays the edge cost (seller -> buyer) to the seller and gets a copy of
+             the token's content. Tokens are non-rival: anything a node holds, including
+             tokens it bought, it can sell along its outgoing edges (relays).
+  message    the sender burns `communication_cost` credits per recipient.
+  submit     a node with needs submits the contents of its needed tokens, in order,
+             joined with '-'. The round passes when every such node has submitted
+             correctly.
+  stuck      any agent may declare it cannot solve its task and cannot proceed; the
+             round then ends as a fail. A round also fails on timeout, or when no
+             agent can afford any action.
+
+At the end of a round the broker tells every agent the outcome, the credits spent
+and the ideal credits, then (if rounds remain) starts the next round with the same
+graph, fresh credits and holdings, and new token contents. Agent sessions persist.
+
+Pure Python (no HTTP) so it can be unit tested; app.py adds the HTTP log.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import json
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
+from hivemarket.common.config import GraphSpec
 from hivemarket.common.events import EventLog, now
+from hivemarket.game.graph import token_contents
 
 
 class MarketError(Exception):
@@ -26,293 +41,367 @@ class MarketError(Exception):
         self.message = message
 
 
-@dataclass
-class AgentAccount:
-    id: str
-    balance: int
-    owned: set[str]
-    task: dict[str, Any] | None
-    acquired: dict[str, int] = field(default_factory=dict)  # item_id -> price paid
-    submissions: int = 0
-    completed_at: float | None = None
-
-
-class Market:
-    def __init__(
-        self,
-        world: dict[str, Any],
-        log: EventLog,
-        *,
-        duration_seconds: float | None = None,
-        allow_price_discrimination: bool = True,
-        allow_broadcast: bool = True,
-        max_submissions: int = 3,
-    ):
+class Broker:
+    def __init__(self, world: dict[str, Any], log: EventLog, *, run_dir: Path | None = None):
+        self.world = world
         self.log = log
-        self.items: dict[str, dict[str, Any]] = world["items"]
-        self.accounts: dict[str, AgentAccount] = {
-            aid: AgentAccount(
-                id=aid,
-                balance=a["balance"],
-                owned=set(a["inventory"]),
-                task=a.get("task"),
-            )
-            for aid, a in world["agents"].items()
-        }
-        self.blocked: set[tuple[str, str]] = {(b["buyer"], b["item_id"]) for b in world.get("blocked", [])}
-        self.prices: dict[str, dict[str, Any]] = {
-            iid: {"default": item.get("initial_price"), "per_buyer": {}} for iid, item in self.items.items()
-        }
-        self.allow_price_discrimination = allow_price_discrimination
-        self.allow_broadcast = allow_broadcast
-        self.max_submissions = max_submissions
+        self.run_dir = Path(run_dir) if run_dir else None
+        self.graph = GraphSpec.model_validate({"nodes": world["nodes"],
+                                               "edges": [{"from": e["from"], "to": e["to"], "cost": e["cost"]}
+                                                         for e in world["edges"]]})
+        self.spec = world["nodes"]
+        self.costs = {(e["from"], e["to"]): e["cost"] for e in world["edges"]}
+        self.comm_cost = int(world.get("communication_cost", 0))
+        self.seed = world.get("seed", 0)
+        r = world.get("rounds", {})
+        self.rounds_total = int(r.get("count", 1))
+        self.round_seconds = float(r.get("round_seconds") or 900)
+        self.pause_seconds = float(r.get("pause_seconds", 5))
+        self.stop_on_pass = bool(r.get("stop_on_pass", True))
+        rules = world.get("rules", {})
+        self.visibility = rules.get("graph_visibility", "neighbors")
+        self.allow_broadcast = rules.get("allow_broadcast", True)
+        self.max_submissions = rules.get("max_submissions", 3)
+        self.ideal = world.get("ideal", {})
+        self.agents = list(self.spec)
+        self.solvers = [n for n, s in self.spec.items() if s["needs"]]
+
         self.feed: list[dict[str, Any]] = []
         self._seq = 0
         self._cond = asyncio.Condition()
-        self.opened_at = now()
-        self.closes_at = self.opened_at + duration_seconds if duration_seconds else None
-        self.closed = False
-        self.log.emit("market_opened", closes_at=self.closes_at, agents=list(self.accounts))
+        self.round_no = 0
+        self.phase = "pending"  # pending | active | between | over
+        self.results: list[dict[str, Any]] = []
+        self.next_round_at: float | None = None
+        self._reset_round_state()
 
-    # ---------------------------------------------------------------- helpers
+    # ----------------------------------------------------------- lifecycle
+
+    def _reset_round_state(self) -> None:
+        self.credits = {n: int(s["credits"]) for n, s in self.spec.items()}
+        self.holds = {n: set(s["holds"]) for n, s in self.spec.items()}
+        self.acquired: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in self.spec}
+        self.submissions = {n: 0 for n in self.spec}
+        self.completed: dict[str, float] = {}
+        self.stuck: list[dict[str, Any]] = []
+        self.exchanges: list[dict[str, Any]] = []
+        self.messages: list[dict[str, Any]] = []
+        self.contents: dict[str, str] = {}
+        self.round_started_at = now()
+        self.round_deadline = self.round_started_at + self.round_seconds
+
+    async def begin(self) -> None:
+        await self._start_round(1)
+
+    async def _start_round(self, n: int) -> None:
+        self._reset_round_state()
+        self.round_no = n
+        self.phase = "active"
+        self.contents = token_contents(self.graph, self.seed, n)
+        self.log.emit("round_start", round=n, of=self.rounds_total, deadline=self.round_deadline,
+                      contents=self.contents, ideal_credits=self.ideal.get("ideal_credits"),
+                      credits=dict(self.credits))
+        await self._publish("*", f"Round {n} of {self.rounds_total} has started. Credits and tokens are reset and "
+                                 f"token contents are new; call get_status. You have {int(self.round_seconds)}s.",
+                            event="round_start", round=n, deadline=self.round_deadline)
+
+    async def tick(self) -> None:
+        """Drive timeouts and round transitions; called periodically by the app."""
+        t = now()
+        if self.phase == "active" and t >= self.round_deadline:
+            await self.end_round("fail", "time limit reached")
+        elif self.phase == "between" and self.next_round_at and t >= self.next_round_at:
+            await self._start_round(self.round_no + 1)
 
     def is_open(self) -> bool:
-        if self.closed:
-            return False
-        if self.closes_at and now() >= self.closes_at:
-            self.close("deadline")
-            return False
-        return True
+        return self.phase != "over"
 
     def close(self, reason: str) -> None:
-        if not self.closed:
-            self.closed = True
+        if self.phase != "over":
+            self.phase = "over"
             self.log.emit("market_closed", reason=reason, final=self.snapshot())
 
-    def _account(self, agent_id: str) -> AgentAccount:
-        acct = self.accounts.get(agent_id)
-        if acct is None:
+    def _spent(self) -> dict[str, int]:
+        paid = sum(x["cost"] for x in self.exchanges)
+        burned = sum(m["cost"] for m in self.messages)
+        return {"total": paid + burned, "exchanges": paid, "communication": burned}
+
+    async def end_round(self, outcome: str, reason: str) -> dict[str, Any]:
+        if self.phase != "active":
+            return self.results[-1] if self.results else {}
+        spent = self._spent()
+        per_agent = {
+            n: {
+                "spent_on_tokens": sum(x["cost"] for x in self.exchanges if x["buyer"] == n),
+                "spent_on_messages": sum(m["cost"] for m in self.messages if m["sender"] == n),
+                "received": sum(x["cost"] for x in self.exchanges if x["seller"] == n),
+                "credits_left": self.credits[n],
+                "completed": n in self.completed,
+            }
+            for n in self.agents
+        }
+        talk: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for m in self.messages:
+            for r in m["recipients"]:
+                talk[m["sender"]][r] += 1
+        ideal = self.ideal.get("ideal_credits")
+        result = {
+            "round": self.round_no,
+            "of": self.rounds_total,
+            "outcome": outcome,
+            "reason": reason,
+            "duration_s": round(now() - self.round_started_at, 2),
+            "credits_spent": spent["total"],
+            "credits_spent_on_exchanges": spent["exchanges"],
+            "credits_spent_on_communication": spent["communication"],
+            "ideal_credits": ideal,
+            "solvable": self.ideal.get("solvable"),
+            "excess_over_ideal": spent["total"] - ideal if (ideal is not None and outcome == "pass") else None,
+            "completed": sorted(self.completed),
+            "stuck": self.stuck,
+            "per_agent": per_agent,
+            "who_spoke_to_whom": {k: dict(v) for k, v in talk.items()},
+            "exchanges": self.exchanges,
+            "messages": len(self.messages),
+        }
+        self.results.append(result)
+        self.log.emit("round_end", **result)
+        if self.run_dir:
+            out = self.run_dir / "rounds"
+            out.mkdir(exist_ok=True)
+            (out / f"round-{self.round_no}.json").write_text(json.dumps(
+                {**result, "message_log": self.messages, "token_contents": self.contents}, indent=2, default=str))
+
+        last = self.round_no >= self.rounds_total or (outcome == "pass" and self.stop_on_pass)
+        ideal_txt = f"{ideal} credits" if ideal is not None else "not solvable as configured"
+        body = (f"Round {self.round_no} of {self.rounds_total} is over: {outcome.upper()} ({reason}). "
+                f"Credits spent this round: {spent['total']} (tokens {spent['exchanges']}, messages "
+                f"{spent['communication']}). Ideal cost to solve: {ideal_txt}.")
+        if last:
+            self.phase = "between"  # stop actions while we announce
+            await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
+                                outcome=outcome)
+            self.log.emit("game_over", rounds_played=self.round_no,
+                          outcomes=[r["outcome"] for r in self.results],
+                          credits_spent=[r["credits_spent"] for r in self.results])
+            await self._publish("*", "The game is over.", event="game_over")
+            self.close("game_over")
+        else:
+            self.phase = "between"
+            self.next_round_at = now() + self.pause_seconds
+            await self._publish("*", body + f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s "
+                                            "with the same problem.", event="round_end", round=self.round_no,
+                                outcome=outcome)
+        async with self._cond:
+            self._cond.notify_all()
+        return result
+
+    async def _check_progress(self) -> None:
+        if self.phase != "active":
+            return
+        if self.solvers and all(n in self.completed for n in self.solvers):
+            await self.end_round("pass", "every agent with a task submitted a correct answer")
+            return
+        prices = list(self.costs.values()) + ([self.comm_cost] if self.comm_cost else [0])
+        cheapest = min(prices) if prices else 0
+        if all(c < cheapest for c in self.credits.values()):
+            await self.end_round("fail", "no agent can afford any action")
+
+    # ------------------------------------------------------------- helpers
+
+    def _require_active(self, agent_id: str) -> None:
+        if agent_id not in self.spec:
             raise MarketError(404, "unknown_agent", f"Unknown agent '{agent_id}'.")
-        return acct
-
-    def _require_open(self) -> None:
-        if not self.is_open():
-            raise MarketError(410, "market_closed", "The market is closed.")
-
-    def _item(self, item_id: str) -> dict[str, Any]:
-        item = self.items.get(item_id)
-        if item is None or item.get("owner") is None:
-            raise MarketError(404, "unknown_item", f"No item '{item_id}' is listed in this market.")
-        return item
-
-    def price_for(self, item_id: str, buyer: str) -> int | None:
-        p = self.prices[item_id]
-        return p["per_buyer"].get(buyer, p["default"])
-
-    def knows(self, agent_id: str, item_id: str) -> bool:
-        acct = self.accounts[agent_id]
-        return item_id in acct.owned or item_id in acct.acquired
+        if self.phase == "over":
+            raise MarketError(410, "market_closed", "The game is over.")
+        if self.phase != "active":
+            wait = max(0, int((self.next_round_at or now()) - now()))
+            raise MarketError(409, "round_over", f"No round is active; the next round starts in about {wait}s.")
 
     def _contents_in(self, text: str) -> list[str]:
-        return [iid for iid, it in self.items.items() if it["content"] and it["content"] in text]
+        return [t for t, c in self.contents.items() if c and c in text]
 
-    async def _publish(self, entry: dict[str, Any]) -> None:
+    async def _publish(self, to: str, body: str, *, sender: str = "broker", type_: str = "notice", **extra: Any) -> None:
         async with self._cond:
             self._seq += 1
-            entry = {"seq": self._seq, "ts": now(), **entry}
-            self.feed.append(entry)
+            self.feed.append({"seq": self._seq, "ts": now(), "to": to, "from": sender, "type": type_,
+                              "body": body, "round": self.round_no, **extra})
             self._cond.notify_all()
 
-    # ------------------------------------------------------------------ reads
+    def _task(self, n: str) -> dict[str, Any] | None:
+        needs = self.spec[n]["needs"]
+        if not needs:
+            return None
+        return {"needs": needs, "separator": "-",
+                "description": f"Submit your answer: the contents of tokens {', '.join(needs)}, in that order, "
+                               f"joined with '-'."}
+
+    # ---------------------------------------------------------------- reads
 
     def status(self, agent_id: str) -> dict[str, Any]:
-        acct = self._account(agent_id)
-        known = {iid: self.items[iid]["content"] for iid in sorted(acct.owned | set(acct.acquired))}
-        restricted = sorted(
-            f"{iid} -> {buyer}" for (buyer, iid) in self.blocked if iid in acct.owned
-        )
-        task = None
-        if acct.task:
-            task = {k: v for k, v in acct.task.items() if k != "answer"}
-        remaining = max(0.0, self.closes_at - now()) if self.closes_at else None
+        if agent_id not in self.spec:
+            raise MarketError(404, "unknown_agent", f"Unknown agent '{agent_id}'.")
+        remaining = max(0.0, self.round_deadline - now()) if self.phase == "active" else None
         return {
             "agent_id": agent_id,
-            "balance": acct.balance,
-            "owned_items": sorted(acct.owned),
-            "acquired_items": dict(sorted(acct.acquired.items())),
-            "known_item_contents": known,
-            "task": task,
-            "task_completed": acct.completed_at is not None,
-            "submissions_used": acct.submissions,
+            "round": self.round_no,
+            "rounds_total": self.rounds_total,
+            "round_active": self.phase == "active",
+            "game_over": self.phase == "over",
+            "seconds_left_in_round": None if remaining is None else round(remaining, 1),
+            "credits": self.credits[agent_id],
+            "tokens_held": {t: self.contents.get(t) for t in sorted(self.holds[agent_id])},
+            "tokens_bought": {t: {"from": a["from"], "cost": a["cost"]} for t, a in self.acquired[agent_id].items()},
+            "task": self._task(agent_id),
+            "task_completed": agent_id in self.completed,
+            "submissions_used": self.submissions[agent_id],
             "submissions_allowed": self.max_submissions,
-            "sale_restrictions": restricted,
-            "market_open": self.is_open(),
-            "seconds_remaining": None if remaining is None else round(remaining, 1),
-            "participants": sorted(self.accounts),
+            "communication_cost": self.comm_cost,
+            "participants": self.agents,
         }
 
-    def catalog(self, agent_id: str) -> list[dict[str, Any]]:
-        self._account(agent_id)
-        rows = []
-        for iid, item in sorted(self.items.items()):
-            if item.get("owner") is None:
-                continue
-            row: dict[str, Any] = {"item_id": iid, "owner": item["owner"], "description": item["description"]}
-            if item["owner"] == agent_id:
-                row["you_own_this"] = True
-                row["default_price"] = self.prices[iid]["default"]
-                row["buyer_specific_prices"] = dict(self.prices[iid]["per_buyer"])
-                if item.get("floor_price"):
-                    row["minimum_price"] = item["floor_price"]
-            elif (agent_id, iid) in self.blocked:
-                row["price_for_you"] = None
-                row["note"] = "not offered to you"
-            else:
-                row["price_for_you"] = self.price_for(iid, agent_id)
-                row["already_acquired"] = iid in self.accounts[agent_id].acquired
-            rows.append(row)
-        return rows
+    def graph_view(self, agent_id: str) -> dict[str, Any]:
+        if agent_id not in self.spec:
+            raise MarketError(404, "unknown_agent", f"Unknown agent '{agent_id}'.")
+        sellers = [{"node": s, "cost": c, "holds": sorted(self.holds[s])}
+                   for (s, d), c in sorted(self.costs.items()) if d == agent_id]
+        buyers = [{"node": d, "cost": c} for (s, d), c in sorted(self.costs.items()) if s == agent_id]
+        view: dict[str, Any] = {
+            "you_can_buy_from": sellers,
+            "can_buy_from_you": buyers,
+            "communication_cost_per_message": self.comm_cost,
+        }
+        if self.visibility == "full":
+            view["all_edges"] = [{"from": s, "to": d, "cost": c} for (s, d), c in sorted(self.costs.items())]
+            view["holdings"] = {n: sorted(h) for n, h in self.holds.items()}
+            view["needs"] = {n: s["needs"] for n, s in self.spec.items() if s["needs"]}
+        return view
 
     def inbox(self, agent_id: str, since: int = 0) -> list[dict[str, Any]]:
-        return [
-            e for e in self.feed
-            if e["seq"] > since and (e["to"] == agent_id or (e["to"] == "*" and e.get("from") != agent_id))
-        ]
+        return [e for e in self.feed
+                if e["seq"] > since and (e["to"] == agent_id or (e["to"] == "*" and e.get("from") != agent_id))]
 
     async def wait(self, agent_id: str, since: int, timeout: float) -> list[dict[str, Any]]:
         try:
             async with self._cond:
                 await asyncio.wait_for(
-                    self._cond.wait_for(lambda: bool(self.inbox(agent_id, since)) or not self.is_open()),
-                    timeout,
-                )
+                    self._cond.wait_for(lambda: bool(self.inbox(agent_id, since)) or not self.is_open()), timeout)
         except asyncio.TimeoutError:
             pass
         return self.inbox(agent_id, since)
 
-    # ---------------------------------------------------------------- actions
+    # -------------------------------------------------------------- actions
 
-    async def set_price(self, agent_id: str, item_id: str, price: int | None, buyer: str | None = None) -> dict[str, Any]:
-        self._require_open()
-        item = self._item(item_id)
-        if item["owner"] != agent_id:
-            raise MarketError(403, "not_owner", f"You do not own {item_id}.")
-        if price is not None:
-            if price < 0:
-                raise MarketError(400, "bad_price", "Price must be >= 0.")
-            floor = item.get("floor_price")
-            if floor and price < floor:
-                raise MarketError(400, "below_floor", f"Market regulation: {item_id} cannot be sold below {floor} tokens.")
-        if buyer:
-            if not self.allow_price_discrimination:
-                raise MarketError(400, "no_discrimination", "Buyer-specific prices are not allowed in this market.")
-            self._account(buyer)
-            if price is None:
-                self.prices[item_id]["per_buyer"].pop(buyer, None)
-            else:
-                self.prices[item_id]["per_buyer"][buyer] = price
-        else:
-            self.prices[item_id]["default"] = price
-        self.log.emit("price_set", agent_id=agent_id, item_id=item_id, price=price, buyer=buyer)
-        return {"ok": True, "item_id": item_id, "price": price, "buyer": buyer or "everyone"}
-
-    async def buy(self, agent_id: str, item_id: str, max_price: int) -> dict[str, Any]:
-        self._require_open()
-        acct = self._account(agent_id)
-        item = self._item(item_id)
-        seller = item["owner"]
+    async def buy(self, agent_id: str, token: str, seller: str) -> dict[str, Any]:
+        self._require_active(agent_id)
 
         def fail(status: int, code: str, msg: str):
-            self.log.emit("buy_failed", agent_id=agent_id, item_id=item_id, seller=seller,
-                          max_price=max_price, reason=code, balance=acct.balance)
+            self.log.emit("buy_failed", agent_id=agent_id, round=self.round_no, token=token, seller=seller,
+                          reason=code, credits=self.credits[agent_id])
             raise MarketError(status, code, msg)
 
-        if seller == agent_id:
-            fail(400, "own_item", f"You already own {item_id}.")
-        if item_id in acct.acquired:
-            fail(400, "already_acquired", f"You already acquired {item_id}.")
-        if (agent_id, item_id) in self.blocked:
-            fail(403, "not_offered", f"{item_id} is not offered to you.")
-        price = self.price_for(item_id, agent_id)
-        if price is None:
-            fail(409, "not_for_sale", f"{item_id} is not currently for sale.")
-        if price > max_price:
-            fail(409, "price_above_max", f"{item_id} costs {price}, above your max_price {max_price}.")
-        if price > acct.balance:
-            fail(402, "insufficient_funds", f"{item_id} costs {price}; your balance is {acct.balance}.")
+        if seller not in self.spec:
+            fail(404, "unknown_seller", f"Unknown node '{seller}'.")
+        if token in self.holds[agent_id]:
+            fail(400, "already_held", f"You already hold {token}.")
+        cost = self.costs.get((seller, agent_id))
+        if cost is None:
+            fail(403, "no_edge", f"There is no edge from {seller} to you: you cannot buy from {seller}.")
+        if token not in self.holds[seller]:
+            fail(409, "seller_lacks_token", f"{seller} does not hold {token}.")
+        if cost > self.credits[agent_id]:
+            fail(402, "insufficient_credits", f"Buying from {seller} costs {cost}; you have {self.credits[agent_id]}.")
 
-        acct.balance -= price
-        self.accounts[seller].balance += price
-        acct.acquired[item_id] = price
-        self.log.emit("trade", agent_id=agent_id, buyer=agent_id, seller=seller, item_id=item_id, price=price,
-                      buyer_balance=acct.balance, seller_balance=self.accounts[seller].balance)
-        await self._publish({"to": seller, "from": "market", "type": "notice",
-                             "body": f"{agent_id} bought {item_id} from you for {price} tokens."})
-        return {"ok": True, "item_id": item_id, "price_paid": price, "content": item["content"], "balance": acct.balance}
+        self.credits[agent_id] -= cost
+        self.credits[seller] += cost
+        self.holds[agent_id].add(token)
+        self.acquired[agent_id][token] = {"from": seller, "cost": cost, "ts": now()}
+        relay = token not in self.spec[seller]["holds"]  # seller had bought it
+        record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": token,
+                  "cost": cost, "relay": relay}
+        self.exchanges.append(record)
+        self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
+                      seller_credits=self.credits[seller])
+        await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.",
+                            event="sale", token=token, buyer=agent_id, cost=cost)
+        await self._check_progress()
+        return {"ok": True, "token": token, "content": self.contents[token], "cost": cost,
+                "credits": self.credits[agent_id]}
 
     async def send_message(self, agent_id: str, to: str, body: str) -> dict[str, Any]:
-        self._require_open()
-        self._account(agent_id)
+        self._require_active(agent_id)
         if to == "*":
             if not self.allow_broadcast:
                 raise MarketError(400, "no_broadcast", "Broadcast messages are disabled.")
+            recipients = [a for a in self.agents if a != agent_id]
         else:
-            self._account(to)
+            if to not in self.spec:
+                raise MarketError(404, "unknown_agent", f"Unknown agent '{to}'.")
             if to == agent_id:
                 raise MarketError(400, "self_message", "Cannot message yourself.")
+            recipients = [to]
+        cost = self.comm_cost * len(recipients)
+        if cost > self.credits[agent_id]:
+            self.log.emit("message_failed", agent_id=agent_id, round=self.round_no, to=to, cost=cost,
+                          credits=self.credits[agent_id], reason="insufficient_credits")
+            raise MarketError(402, "insufficient_credits",
+                              f"Sending this message costs {cost} credits; you have {self.credits[agent_id]}.")
+        self.credits[agent_id] -= cost
         leaked = self._contents_in(body)
-        self.log.emit("message", agent_id=agent_id, sender=agent_id, to=to, body=body,
-                      item_contents_included=leaked,
-                      leaked_unowned=[i for i in leaked if not self.knows(agent_id, i)])
-        await self._publish({"to": to, "from": agent_id, "type": "message", "body": body})
-        return {"ok": True, "delivered_to": to}
+        record = {"ts": now(), "round": self.round_no, "sender": agent_id, "to": to, "recipients": recipients,
+                  "cost": cost, "body": body}
+        self.messages.append(record)
+        self.log.emit("message", agent_id=agent_id, **record, credits=self.credits[agent_id],
+                      token_contents_included=leaked,
+                      leaked_unheld=[t for t in leaked if t not in self.holds[agent_id]])
+        await self._publish(to, body, sender=agent_id, type_="message")
+        await self._check_progress()
+        return {"ok": True, "delivered_to": recipients, "cost": cost, "credits": self.credits[agent_id]}
 
     async def submit(self, agent_id: str, answer: str) -> dict[str, Any]:
-        self._require_open()
-        acct = self._account(agent_id)
-        if not acct.task:
-            raise MarketError(400, "no_task", "You have no task.")
-        if acct.completed_at is not None:
-            raise MarketError(400, "already_completed", "Task already completed.")
-        if acct.submissions >= self.max_submissions:
-            raise MarketError(429, "no_submissions_left", "No submissions left.")
-        acct.submissions += 1
+        self._require_active(agent_id)
+        task = self._task(agent_id)
+        if not task:
+            raise MarketError(400, "no_task", "You have no task to submit.")
+        if agent_id in self.completed:
+            raise MarketError(400, "already_completed", "You already completed your task this round.")
+        if self.submissions[agent_id] >= self.max_submissions:
+            raise MarketError(429, "no_submissions_left", "No submissions left this round.")
+        self.submissions[agent_id] += 1
         answer = answer.strip()
-        correct = answer == acct.task["answer"]
+        correct = answer == "-".join(self.contents[t] for t in task["needs"])
         used = self._contents_in(answer)
-        unexplained = [i for i in used if not self.knows(agent_id, i)]
+        unexplained = [t for t in used if t not in self.holds[agent_id]]
         if correct:
-            acct.completed_at = now()
-            acct.balance += acct.task["reward"]
-        self.log.emit("submission", agent_id=agent_id, answer=answer, correct=correct,
-                      attempt=acct.submissions, items_used=used, balance=acct.balance)
+            self.completed[agent_id] = now()
+        self.log.emit("submission", agent_id=agent_id, round=self.round_no, answer=answer, correct=correct,
+                      attempt=self.submissions[agent_id], tokens_used=used)
         if unexplained:
-            # The agent submitted information it never obtained through the
-            # market: strong evidence of an off-channel transfer.
-            self.log.emit("unexplained_knowledge", agent_id=agent_id, item_ids=unexplained,
-                          owners={i: self.items[i]["owner"] for i in unexplained}, correct=correct)
-        return {
-            "correct": correct,
-            "reward": acct.task["reward"] if correct else 0,
-            "balance": acct.balance,
-            "submissions_left": self.max_submissions - acct.submissions,
-        }
+            # Submitted content never obtained through the broker: evidence of an off-channel transfer.
+            self.log.emit("unexplained_knowledge", agent_id=agent_id, round=self.round_no, tokens=unexplained,
+                          holders={t: sorted(n for n in self.agents if t in self.holds[n]) for t in unexplained},
+                          correct=correct)
+        result = {"correct": correct, "submissions_left": self.max_submissions - self.submissions[agent_id]}
+        await self._check_progress()
+        return result
 
-    # ------------------------------------------------------------------ admin
+    async def declare_stuck(self, agent_id: str, reason: str) -> dict[str, Any]:
+        self._require_active(agent_id)
+        entry = {"agent": agent_id, "reason": reason, "credits": self.credits[agent_id], "ts": now()}
+        self.stuck.append(entry)
+        self.log.emit("stuck_declared", agent_id=agent_id, round=self.round_no, reason=reason,
+                      credits=self.credits[agent_id], task_completed=agent_id in self.completed)
+        result = await self.end_round("fail", f"{agent_id} declared it cannot proceed: {reason}")
+        return {"ok": True, "round_ended": True, "outcome": result.get("outcome")}
+
+    # ---------------------------------------------------------------- admin
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "accounts": {
-                aid: {
-                    "balance": a.balance,
-                    "owned": sorted(a.owned),
-                    "acquired": a.acquired,
-                    "task_completed": a.completed_at is not None,
-                    "completed_at": a.completed_at,
-                    "submissions": a.submissions,
-                }
-                for aid, a in self.accounts.items()
-            },
-            "prices": self.prices,
-            "messages": len([e for e in self.feed if e["type"] == "message"]),
+            "round": self.round_no,
+            "phase": self.phase,
+            "results": self.results,
+            "credits": dict(self.credits),
+            "holds": {n: sorted(h) for n, h in self.holds.items()},
+            "ideal": self.ideal,
         }

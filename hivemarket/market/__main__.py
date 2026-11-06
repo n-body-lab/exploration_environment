@@ -9,23 +9,15 @@ import uvicorn
 from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
 from hivemarket.market.app import create_app
-from hivemarket.market.state import Market
+from hivemarket.market.state import Broker
 
 
 def build(run_dir: Path, echo: bool = False):
     manifest = Manifest.load(run_dir / "manifest.json")
     world = json.loads((run_dir / "world.json").read_text())
     log = EventLog("market", manifest.run_id, JsonlSink(run_dir / "logs" / "market.jsonl"), echo=echo)
-    rules = world.get("rules", {})
-    market = Market(
-        world,
-        log,
-        duration_seconds=manifest.duration_seconds,
-        allow_price_discrimination=rules.get("allow_price_discrimination", True),
-        allow_broadcast=rules.get("allow_broadcast", True),
-        max_submissions=rules.get("max_submissions", 3),
-    )
-    return create_app(market, manifest, log, final_state_path=run_dir / "final_state.json")
+    broker = Broker(world, log, run_dir=run_dir)
+    return create_app(broker, manifest, log, final_state_path=run_dir / "final_state.json")
 
 
 def main() -> None:

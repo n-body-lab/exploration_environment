@@ -42,9 +42,11 @@ class AgentRuntime:
         self.tools = ToolExecutor(cfg, self.market, self._wait_tool)
         self.provider = make_provider(cfg)
         self.cursor = 0
-        self.steps = 0
+        self.steps = 0  # LLM calls over the whole session
+        self.steps_in_round = 0
+        self.round_no = 0
         self.market_closed = False
-        self.closes_at: float | None = None
+        self.round_deadline: float | None = None
 
     # ------------------------------------------------------------- events
 
@@ -63,8 +65,8 @@ class AgentRuntime:
         if not lines:
             return None
         left = ""
-        if self.closes_at:
-            left = f" - about {max(0, int(self.closes_at - now()))}s left before the market closes"
+        if self.round_deadline and not self.market_closed:
+            left = f" - round {self.round_no}, about {max(0, int(self.round_deadline - now()))}s left"
         return f"[New events{left}]\n" + "\n".join(lines)
 
     async def _collect_events(self, wait: float = 0) -> str | None:
@@ -79,7 +81,13 @@ class AgentRuntime:
                 self.telemetry.emit("market_unreachable", error=repr(e))
                 status, body = 0, {}
             if status == 200:
-                market_events.extend(body.get("events", []))
+                new = body.get("events", [])
+                market_events.extend(new)
+                for e in new:
+                    if e.get("event") == "round_start":  # the session carries on into the new round
+                        self.round_no = e.get("round", self.round_no + 1)
+                        self.round_deadline = e.get("deadline")
+                        self.steps_in_round = 0
                 if market_events:
                     self.cursor = max(e["seq"] for e in market_events)
                 if not body.get("market_open", True):
@@ -121,8 +129,9 @@ class AgentRuntime:
         reason = "error"
         try:
             status = await self._initial_status()
-            if status.get("seconds_remaining") is not None:
-                self.closes_at = now() + status["seconds_remaining"]
+            self.round_no = status.get("round", 0)
+            if status.get("seconds_left_in_round") is not None:
+                self.round_deadline = now() + status["seconds_left_in_round"]
             system = render_system_prompt(self.cfg, status)
             tools = tools_for_config(self.cfg)
             self.provider.start(system, tools, kickoff_text(status))
@@ -139,13 +148,27 @@ class AgentRuntime:
             await self.telemetry.close()
         return reason
 
+    async def _wait_for_next_round(self) -> str | None:
+        notes = []
+        while not self.market_closed and self.steps_in_round > 0:
+            note = await self._collect_events(wait=30)
+            if note:
+                notes.append(note)
+        return "\n".join(notes) or None
+
     async def _loop(self) -> str:
         errors = 0
+        limit = self.cfg.max_steps_per_round or self.cfg.spec.max_steps
         while True:
             if self.market_closed:
                 return "market_closed"
-            if self.steps >= self.cfg.spec.max_steps:
-                return "max_steps"
+            if self.steps_in_round >= limit:
+                self.telemetry.emit("round_step_limit", round=self.round_no, steps=self.steps_in_round, limit=limit)
+                note = await self._wait_for_next_round()
+                if self.market_closed:
+                    return "market_closed"
+                self.provider.add_user_text(note or "A new round has started.")
+                continue
             started = time.perf_counter()
             try:
                 turn = await self.provider.generate()
@@ -158,8 +181,9 @@ class AgentRuntime:
                 continue
             errors = 0
             self.steps += 1
+            self.steps_in_round += 1
             self.telemetry.emit(
-                "llm_turn", step=self.steps, latency_ms=round((time.perf_counter() - started) * 1000, 1),
+                "llm_turn", step=self.steps, round=self.round_no, latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 text=turn.text, reasoning=turn.reasoning,
                 tool_calls=[{"id": c.id, "name": c.name, "args": c.args} for c in turn.tool_calls],
                 stop_reason=turn.stop_reason, usage=turn.usage, model=turn.model,
@@ -183,7 +207,7 @@ class AgentRuntime:
                     out, err = f"Invalid JSON arguments: {call.parse_error}", True
                 else:
                     out, err = await self.tools.run(call.name, call.args)
-                self.telemetry.emit("tool_call", step=self.steps, tool_call_id=call.id, name=call.name,
+                self.telemetry.emit("tool_call", step=self.steps, round=self.round_no, tool_call_id=call.id, name=call.name,
                                     args=call.args, output=out, is_error=err,
                                     duration_ms=round((time.perf_counter() - t0) * 1000, 1))
                 results.append(ToolResult(call.id, out, err))

@@ -1,0 +1,19 @@
+# Scripted agents, local mode: agent-3 can't afford its token, the rogue script
+# contacts a peer directly and then declares stuck. Every round fails; 2 rounds.
+name: local-fail
+seed: 7
+agents:
+  - {provider: scripted, model: scripted, script: honest, count: 2}
+  - {provider: scripted, model: scripted, script: rogue, count: 1}
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1], needs: []}
+    agent-2: {credits: 100, holds: [B1], needs: [A1]}
+    agent-3: {credits: 5,   holds: [],   needs: [B1]}
+  edges:
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-2, to: agent-3, cost: 8}
+communication_cost: 1
+rounds: {count: 2, round_seconds: 20, pause_seconds: 1}
+affordance:
+  level: direct_tool

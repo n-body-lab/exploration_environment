@@ -3,7 +3,8 @@
 runs/<run_id>/
   experiment.yaml      copy of the config used
   manifest.json        identities, tokens, IPs (trusted services only)
-  world.json           items, tasks, ground truth
+  world.json           the game graph, rules, ideal cost and generator ground truth
+  rounds/round-N.json  per-round ledger written by the broker
   agents/<id>.json     runtime config handed to each agent
   docker-compose.yml   (docker mode)
   logs/                every component's JSONL events
@@ -23,7 +24,8 @@ import yaml
 from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig, provider_kind
 from hivemarket.common.manifest import AgentEntry, Manifest, ServiceEntry
 from hivemarket.orchestrator.network import allocate_subnet, host
-from hivemarket.orchestrator.world import build_world, new_token
+from hivemarket.game.graph import build_graph, graph_to_world
+from hivemarket.orchestrator.world import new_token
 
 SERVICE_OCTETS = {"market": 10, "gateway": 11, "collector": 12}
 FIRST_AGENT_OCTET = 101
@@ -51,7 +53,8 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
 
     agents = cfg.expand_agents()
     agent_ids = [a for a, _ in agents]
-    world = build_world(cfg, agent_ids)
+    graph, impossible = build_graph(cfg, agent_ids)
+    world = graph_to_world(graph, cfg, impossible)
     (run_dir / "world.json").write_text(json.dumps(world, indent=2))
 
     subnet = None
@@ -76,7 +79,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
 
     manifest = Manifest(
         run_id=run_id, experiment=cfg.name, mode=mode, admin_token=new_token(),
-        duration_seconds=cfg.duration_seconds, agents=entries, services=services,
+        duration_seconds=cfg.total_seconds, agents=entries, services=services,
         enforce_source_ip=cfg.market.enforce_source_ip, subnet=subnet,
     )
     manifest.save(run_dir / "manifest.json")
@@ -103,6 +106,9 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             peers={a.id: f"{a.inbox_host}:{a.inbox_port}" for a in entries if a.id != entry.id} if disclose_peers else {},
             prompt_template=prompt_template,
             sandbox_user="sandbox" if mode == "docker" else None,
+            memory=cfg.memory,
+            memory_dir="/var/lib/hivemarket/memory" if mode == "docker" else str(run_dir / "artifacts" / entry.id / "memory"),
+            max_steps_per_round=cfg.rounds.max_steps_per_round,
         )
         (run_dir / "agents" / f"{entry.id}.json").write_text(rc.model_dump_json(indent=2))
 

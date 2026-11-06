@@ -18,11 +18,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def experiment(tmp_path, **overrides) -> Path:
-    cfg = yaml.safe_load((ROOT / "experiments" / "local_smoke.yaml").read_text())
+    cfg = yaml.safe_load((ROOT / "experiments" / "local_fail.yaml").read_text())
     cfg.update(overrides)
     path = tmp_path / "exp.yaml"
     path.write_text(yaml.safe_dump(cfg))
     return path
+
+
+def test_memory_is_never_exposed():
+    turn = {"kind": "llm_turn", "ts_iso": "t", "data": {"step": 1, "text": "x", "tool_calls": [
+        {"name": "memory", "args": {"command": "write", "content": "secret plan"}},
+        {"name": "buy", "args": {"token": "A1", "seller": "a"}}]}}
+    rec = project(turn, ["text", "reasoning", "tool_calls", "tool_results"])
+    assert rec["tool_calls"] == [{"name": "buy", "args": {"token": "A1", "seller": "a"}}]
+    result = {"kind": "tool_call", "data": {"name": "memory", "output": "secret plan"}}
+    assert project(result, ["tool_results"]) is None
+
+
+def test_memory_store(tmp_path):
+    from hivemarket.agent.tools import MemoryStore
+    m = MemoryStore(tmp_path / "mem", max_file=20, max_total=30)
+    assert m.run("view", None, None) == ("Memory is empty.", False)
+    assert not m.run("write", "notes.md", "hello")[1]
+    m.run("append", "notes.md", " world")
+    assert m.run("view", "notes.md", None) == ("hello world", False)
+    assert m.run("write", "../escape", "x")[1] and m.run("write", "big", "x" * 21)[1]
+    assert m.run("write", "b.md", "y" * 20)[1]  # 11 + 20 bytes > total limit of 30
+    assert not m.run("delete", "notes.md", None)[1]
 
 
 def test_visibility_and_projection():
@@ -78,8 +100,11 @@ def test_docker_compose_layout(tmp_path):
     assert svc["agent-1"]["network_mode"] == "service:monitor-agent-1"
     assert "view-agent-1:/shared/agents:ro" in svc["agent-1"]["volumes"]
     assert "view-agent-1:/watch/shared" in svc["monitor-agent-1"]["volumes"]
-    assert svc["agent-2"]["volumes"] == ["ws-agent-2:/home/sandbox"]  # agent-2 may read no one
-    assert set(compose["volumes"]) == {"ws-agent-1", "ws-agent-2", "ws-agent-3", "view-agent-1"}
+    assert not any("view" in v for v in svc["agent-2"]["volumes"])  # agent-2 may read no one
+    assert set(compose["volumes"]) == {"ws-agent-1", "ws-agent-2", "ws-agent-3", "view-agent-1",
+                                       "mem-agent-1", "mem-agent-2", "mem-agent-3"}
+    assert "mem-agent-1:/var/lib/hivemarket/memory" in svc["agent-1"]["volumes"]
+    assert "mem-agent-1:/watch/memory" in svc["monitor-agent-1"]["volumes"]
     assert svc["monitor-agent-1"]["networks"]["agentnet"]["ipv4_address"] == "10.77.1.101"
     if shutil.which("docker"):
         r = subprocess.run(["docker", "compose", "-f", str(run_dir / "docker-compose.yml"), "config", "--quiet"],

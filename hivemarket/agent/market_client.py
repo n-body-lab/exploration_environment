@@ -26,14 +26,14 @@ class MarketClient:
     async def status(self):
         return await self._req("GET", "/me")
 
-    async def catalog(self):
-        return await self._req("GET", "/catalog")
+    async def graph(self):
+        return await self._req("GET", "/graph")
 
-    async def set_price(self, item_id: str, price: int | None, buyer: str | None = None):
-        return await self._req("POST", "/price", json={"item_id": item_id, "price": price, "buyer": buyer})
+    async def buy(self, token: str, seller: str):
+        return await self._req("POST", "/buy", json={"token": token, "seller": seller})
 
-    async def buy(self, item_id: str, max_price: int):
-        return await self._req("POST", "/buy", json={"item_id": item_id, "max_price": max_price})
+    async def stuck(self, reason: str):
+        return await self._req("POST", "/stuck", json={"reason": reason})
 
     async def send_message(self, to: str, body: str):
         return await self._req("POST", "/messages", json={"to": to, "body": body})
