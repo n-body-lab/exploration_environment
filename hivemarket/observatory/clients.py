@@ -48,6 +48,9 @@ class ClickHouse:
                      settings={"date_time_input_format": "best_effort", "input_format_skip_unknown_fields": 1})
         return len(lines)
 
+    def delete_run(self, table: str, run_id: str) -> None:
+        self.execute(f"DELETE FROM {table} WHERE run_id = '{run_id.replace(chr(39), '')}'")
+
     def query_json(self, sql: str) -> list[dict[str, Any]]:
         text = self.execute(sql + " FORMAT JSONEachRow")
         return [json.loads(line) for line in text.splitlines() if line.strip()]

@@ -5,6 +5,8 @@
   hivemarket local experiments/local_smoke.yaml  run in-process (scripted agents / dev)
   hivemarket init  experiments/x.yaml [--mode ...]  only create the run directory
   hivemarket report runs/<run_id>              (re)build timeline.jsonl + summary.md
+  hivemarket analyze runs/<run_id> [--judge-model M]  backchannel, collusion signals, exploration
+  hivemarket calibrate-signals                 score the embedding tier on the labelled calibration set
   hivemarket ingest runs/<run_id> [--full]     (re)ship a run to the observatory
   hivemarket backup --to /path                 ClickHouse backup + mirror of object storage
 """
@@ -58,6 +60,16 @@ def main() -> None:
             sp.add_argument("--echo", action="store_true", help="print events as they happen")
     rp = sub.add_parser("report")
     rp.add_argument("run_dir")
+    ap = sub.add_parser("analyze")
+    ap.add_argument("run_dir")
+    ap.add_argument("--embeddings", default="local", help="local | hashing | none | <fastembed model name>")
+    ap.add_argument("--judge-model", help="run the LLM judge on flagged texts with this model (costs money)")
+    ap.add_argument("--judge-limit", type=int, default=50)
+    ap.add_argument("--judge-all", action="store_true", help="judge every text unit, not only flagged ones")
+    ap.add_argument("--no-ship", action="store_true")
+    cp = sub.add_parser("calibrate-signals")
+    cp.add_argument("--embeddings", default="local")
+    cp.add_argument("--set", default=str(Path(__file__).resolve().parents[1] / "tests" / "data" / "signal_calibration.yaml"))
     ip = sub.add_parser("ingest")
     ip.add_argument("run_dir")
     ip.add_argument("--full", action="store_true", help="ignore checkpoints and re-ship everything (dedup-safe)")
@@ -74,6 +86,22 @@ def main() -> None:
     if args.cmd == "backup":
         from hivemarket.observatory.manage import backup
         backup(args.to)
+        return
+    if args.cmd == "analyze":
+        from hivemarket.analysis.pipeline import analyze
+        run_dir = Path(args.run_dir)
+        s = analyze(run_dir, embeddings=args.embeddings, judge_model=args.judge_model, judge_limit=args.judge_limit,
+                     judge_all=args.judge_all)
+        print(write_report(run_dir).read_text())
+        if not args.no_ship:
+            shipper = make_shipper(run_dir)
+            if shipper:
+                print(f"shipped: {shipper.sync()}")
+        print(f"backchannel messages: {s['backchannel']['messages']}, signals: {s['signals']['by_concept']}")
+        return
+    if args.cmd == "calibrate-signals":
+        from hivemarket.analysis.signals import calibrate, make_embedder
+        print(json.dumps(calibrate(make_embedder(args.embeddings), args.set), indent=1))
         return
     if args.cmd == "report":
         print(write_report(Path(args.run_dir)).read_text())
@@ -110,6 +138,11 @@ def main() -> None:
         status = "failed"
         raise
     finally:
+        try:  # analysis is best-effort: a failure must not lose the run's report or shipping
+            from hivemarket.analysis.pipeline import analyze
+            analyze(run_dir, embeddings="local")
+        except Exception as e:
+            print(f"warning: analysis failed ({e!r}); rerun with `hivemarket analyze {run_dir}`", file=sys.stderr)
         print(write_report(run_dir).read_text())
         if shipper:
             print(f"shipped: {shipper.finish(status)}")

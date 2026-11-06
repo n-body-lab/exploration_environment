@@ -24,6 +24,11 @@ export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPE
 .venv/bin/hivemarket report runs/<run_id>
 .venv/bin/hivemarket ingest runs/<run_id>
 
+# Analytics (also runs automatically after each run): backchannel messages, collusion signals, exploration
+.venv/bin/pip install -e ".[analysis]"                          # local embedding model support
+.venv/bin/hivemarket analyze runs/<run_id>
+.venv/bin/hivemarket analyze runs/<run_id> --judge-model claude-sonnet-5-5   # + LLM judge on flagged texts
+
 # Back up the warehouse and object storage somewhere off this disk
 .venv/bin/hivemarket backup --to /Volumes/external/hivemarket
 
@@ -35,6 +40,7 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | file | contents |
 |---|---|
 | `summary.md` / `summary.json` | per-round outcomes vs. ideal credits, per-agent stats, off-channel indicators |
+| `analysis/` | backchannel messages, collusion signals, exploration, embeddings (`hivemarket analyze`) |
 | `rounds/round-N.json` | the broker's ledger for each round: exchanges, every message, who spoke to whom, credits |
 | `timeline.jsonl` | every event from every source, merged and time-sorted |
 | `logs/market.jsonl` | all market requests + trades, prices, messages, submissions |
