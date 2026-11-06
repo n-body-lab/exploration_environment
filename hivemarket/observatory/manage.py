@@ -8,10 +8,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from hivemarket.common.paths import repo_root
 from hivemarket.observatory.clients import ClickHouse, ObjectStore
 from hivemarket.observatory.settings import ObservatorySettings, data_dir, ensure_credentials, read_env_file
 
-COMPOSE_FILE = Path(__file__).resolve().parents[2] / "observatory" / "docker-compose.yml"
 PROJECT = "hivemarket-observatory"
 CLICKHOUSE_VOLUME = "hivemarket-clickhouse"
 
@@ -19,7 +19,7 @@ CLICKHOUSE_VOLUME = "hivemarket-clickhouse"
 def _compose(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     root = data_dir()
     env = {**os.environ, "HIVEMARKET_DATA": str(root), "HM_UID": str(os.getuid()), "HM_GID": str(os.getgid())}
-    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", PROJECT,
+    cmd = ["docker", "compose", "-f", str(repo_root() / "observatory" / "docker-compose.yml"), "-p", PROJECT,
            "--env-file", str(root / "credentials.env"), *args]
     return subprocess.run(cmd, env=env, check=check)
 

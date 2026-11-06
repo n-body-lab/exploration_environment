@@ -69,7 +69,7 @@ def main() -> None:
     ap.add_argument("--no-ship", action="store_true")
     cp = sub.add_parser("calibrate-signals")
     cp.add_argument("--embeddings", default="local")
-    cp.add_argument("--set", default=str(Path(__file__).resolve().parents[1] / "tests" / "data" / "signal_calibration.yaml"))
+    cp.add_argument("--set", help="calibration YAML (default: tests/data/signal_calibration.yaml in the checkout)")
     ip = sub.add_parser("ingest")
     ip.add_argument("run_dir")
     ip.add_argument("--full", action="store_true", help="ignore checkpoints and re-ship everything (dedup-safe)")
@@ -101,7 +101,9 @@ def main() -> None:
         return
     if args.cmd == "calibrate-signals":
         from hivemarket.analysis.signals import calibrate, make_embedder
-        print(json.dumps(calibrate(make_embedder(args.embeddings), args.set), indent=1))
+        from hivemarket.common.paths import repo_root
+        path = args.set or str(repo_root() / "tests" / "data" / "signal_calibration.yaml")
+        print(json.dumps(calibrate(make_embedder(args.embeddings), path), indent=1))
         return
     if args.cmd == "report":
         print(write_report(Path(args.run_dir)).read_text())
