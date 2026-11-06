@@ -45,6 +45,7 @@ class AgentRuntime:
         self.steps = 0  # LLM calls over the whole session
         self.steps_in_round = 0
         self.round_no = 0
+        self.last_round_ended = 0  # from the broker's round_end notices
         self.market_closed = False
         self.round_deadline: float | None = None
         self.summaries: list[str] = []  # written by the agent at each checkpoint
@@ -91,8 +92,10 @@ class AgentRuntime:
                         self.round_no = e.get("round", self.round_no + 1)
                         self.round_deadline = e.get("deadline")
                         self.steps_in_round = 0
-                    elif e.get("event") == "round_end" and self.cfg.context.reset_each_round:
-                        self.pending_checkpoint = "round_end"
+                    elif e.get("event") == "round_end":
+                        self.last_round_ended = max(self.last_round_ended, e.get("round", self.round_no))
+                        if self.cfg.context.reset_each_round:
+                            self.pending_checkpoint = "round_end"
                 if market_events:
                     self.cursor = max(e["seq"] for e in market_events)
                 if not body.get("market_open", True):
@@ -184,12 +187,19 @@ class AgentRuntime:
                             first_message=first, summaries=len(self.summaries))
 
     async def _await_round_start(self) -> str | None:
+        """Wait until a round after the last ended one is under way.
+
+        Compares with the round that ended, not the round number when we started waiting:
+        the round_end and the next round_start notices often arrive in the same batch (e.g.
+        after a slow model turn), and by then round_no already points at the new round.
+        """
         notes = []
-        start_round = self.round_no
-        while not self.market_closed and self.round_no == start_round:
+        while not self.market_closed and self.round_no <= self.last_round_ended:
             note = await self._collect_events(wait=30)
             if note:
                 notes.append(note)
+        # A round that ended while we were waiting was never played: nothing to summarize.
+        self.pending_checkpoint = None
         return "\n".join(notes) or None
 
     async def _wait_for_next_round(self) -> str | None:

@@ -5,7 +5,7 @@ seed: 1
 agents:
   - provider: adaption
     model: qwen3.5-397b         # check the model's context window and set context.window_tokens to match
-    max_tokens: 4096            # leave room for the conversation
+    max_tokens: 8192            # Qwen reasons at length; 4096 cut replies off mid-thought
     effort: null                # not sent to OpenAI-compatible servers unless set
     count: 3
 graph:
