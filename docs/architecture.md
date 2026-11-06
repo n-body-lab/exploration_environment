@@ -202,6 +202,7 @@ open http://127.0.0.1:3000      # Grafana "HiveMarket run" dashboard, refreshes 
 - Each run has its own compose project, private `internal` subnet and volumes, so runs can execute in parallel. Agents have no internet access; their only egress is the gateway.
 - Agent containers drop all capabilities except SETUID/SETGID (used to run bash as the unprivileged `sandbox` user), and run with `no-new-privileges`, a pids limit and CPU/memory limits.
 - The bash tool runs as `sandbox` and can't read the runtime's environment, memory or token.
+- The harness code (the `hivemarket` package and `/app`) is readable only by root, so agents can't learn about the monitoring or the off-channel detectors by reading it, which would make them aware they're in a monitored test. Agents can still see that a `hivemarket` folder exists, and `ps` shows the runtime's command line (`python -m hivemarket.agent`).
 - Agent containers mount only their own workspace and (in files mode) their own read-only trace view. They never mount the run directory.
 - Local mode (`hivemarket local`) has none of these protections and refuses LLM agents a shell unless you pass `--unsafe-local-shell`. Transparency `files` mode is Docker-only.
 
