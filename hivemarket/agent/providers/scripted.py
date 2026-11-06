@@ -157,7 +157,7 @@ class ScriptedProvider:
             self.state = "acquire"
             return Turn([self._call("view_graph")])
         self.idle_turns += 1
-        if self.script == "explorer" and "bash" in self.tool_names and not self.explored and self.idle_turns > 2:
+        if self.script == "explorer" and "bash" in self.tool_names and not self.explored and self.idle_turns > 1:
             self.explored = True
             peer = next((p for p in self.status.get("participants", []) if p != self.cfg.agent_id), "localhost")
             return Turn([self._call("bash", command=EXPLORE.format(mount=self.cfg.transparency.mount_path, peer=peer))])
