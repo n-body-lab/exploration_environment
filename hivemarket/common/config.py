@@ -22,11 +22,12 @@ class AgentSpec(BaseModel):
 
     provider: str = "anthropic"  # anthropic | openai | google | openrouter | <custom route> | scripted
     model: str = "claude-opus-5-5"
-    effort: str | None = "high"  # anthropic: output_config.effort; openai-style: reasoning_effort
+    effort: str | None = None  # anthropic: output_config.effort (default "high"); openai-style: reasoning_effort, sent only if set
     thinking: Literal["adaptive", "off"] = "adaptive"  # anthropic only; "off" for models without adaptive thinking
     fallbacks: bool = True  # anthropic: server-side refusal fallback (the serving model is logged per turn)
     max_steps: int = 80  # max LLM calls
-    max_tokens: int = 16000
+    max_tokens: int = 16000  # per response; keep well below the context window (e.g. 4096 for 32K models)
+    extra_body: dict[str, Any] = Field(default_factory=dict)  # provider-specific request fields, e.g. {enable_thinking: false}
     script: str | None = None  # scripted provider: honest | rogue
     prompt_vars: dict[str, Any] = Field(default_factory=dict)
 
@@ -203,6 +204,25 @@ class MemoryConfig(BaseModel):
     max_total_bytes: int = 1_000_000
 
 
+class ContextConfig(BaseModel):
+    """One context policy for every agent, so models are compared under the same memory conditions.
+
+    Checkpoint & restart: the agent writes a summary for its future self (tools disabled), then
+    continues in a fresh conversation holding its summaries, its memory files and its current
+    status. Triggered at each round boundary and when a conversation passes
+    `reset_at_fraction` of `window_tokens`. A provider "context too long" error restarts
+    without a summary.
+    """
+
+    model_config = {"extra": "forbid"}
+    window_tokens: int = 100_000  # budget for every agent: set to the smallest model's window
+    reset_at_fraction: float = Field(default=0.75, gt=0, le=1)
+    reset_each_round: bool = True
+    summary_chars: int = 3000  # cap per summary
+    max_summaries: int = 6  # most recent summaries carried into a restart
+    memory_chars_in_restart: int = 8000  # memory contents shown on restart (the rest via the memory tool)
+
+
 class GatewayRoute(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -210,6 +230,7 @@ class GatewayRoute(BaseModel):
     api_key_env: str
     auth: Literal["bearer", "x-api-key"] = "bearer"
     kind: Literal["anthropic", "openai"] = "openai"
+    max_tokens_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
 
 
 class ExperimentConfig(BaseModel):
@@ -226,6 +247,7 @@ class ExperimentConfig(BaseModel):
     rounds: RoundsConfig = Field(default_factory=RoundsConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
     transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     prompt_file: str | None = None  # relative to the experiment file; default prompts/system.md
@@ -239,6 +261,10 @@ class ExperimentConfig(BaseModel):
             raise ValueError("need at least 2 agents")
         if self.graph and total != len(self.graph.nodes):
             raise ValueError(f"graph has {len(self.graph.nodes)} nodes but agents add up to {total}")
+        for g in self.agents:
+            if g.max_tokens > self.context.window_tokens // 3:
+                raise ValueError(f"max_tokens {g.max_tokens} is too large for context.window_tokens "
+                                 f"{self.context.window_tokens}; keep it under a third of the window")
         return self
 
     @property
@@ -293,6 +319,8 @@ class AgentRuntimeConfig(BaseModel):
     peers: dict[str, str] = Field(default_factory=dict)  # agent_id -> host:port, only when disclosed
     prompt_template: str
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
+    max_tokens_param: str = "max_tokens"
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
     sandbox_user: str | None = "sandbox"

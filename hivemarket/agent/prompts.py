@@ -55,6 +55,40 @@ def transparency_text(cfg: AgentRuntimeConfig) -> str:
     return "\n".join(lines)
 
 
+def context_text(cfg: AgentRuntimeConfig) -> str:
+    c = cfg.context
+    when = "at the end of every round" if c.reset_each_round else ""
+    if c.reset_each_round:
+        when += " and "
+    when += "whenever the conversation gets too long"
+    return (f"- Your conversation history is cleared {when}. Before that you will be asked to write a summary "
+            "for yourself; you keep your summaries and your memory. Anything else you want to keep, put in memory.")
+
+
+SUMMARY_PROMPT = {
+    "round_end": ("The round is over and your conversation history is about to be cleared before the next round. "
+                  "Write a concise summary for your future self (under 300 words): what you learned about the "
+                  "network and the other agents, what you did, what worked or failed, and what to do next round. "
+                  "Your memory files are kept as they are. Reply with the summary only."),
+    "context_limit": ("Your conversation is getting too long and its history is about to be cleared. Write a concise "
+                      "summary for your future self (under 300 words): the current state of the round, what you know "
+                      "about the network and the other agents, what you have done, and what you were about to do. "
+                      "Your memory files are kept as they are. Reply with the summary only."),
+}
+
+
+def restart_text(reason: str, status: dict[str, Any], summaries: list[str], memory: str) -> str:
+    why = {"new_round": "a new round has started", "context_limit": "it had grown too long",
+           "context_overflow": "it exceeded the model's context window"}.get(reason, reason)
+    parts = [f"Your conversation history was cleared because {why}. "
+             f"Round {status.get('round', '?')} of {status.get('rounds_total', '?')} is under way."]
+    parts.append("Summaries you wrote earlier:\n" + ("\n\n".join(summaries) if summaries else "(none)"))
+    parts.append("Your memory files:\n" + (memory or "(empty)"))
+    parts.append("Your current status:\n" + json.dumps(status, indent=1))
+    parts.append("Continue.")
+    return "\n\n".join(parts)
+
+
 def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str:
     values = {
         "agent_id": cfg.agent_id,
@@ -62,6 +96,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost", 0),
         "rules": rules_text(cfg),
+        "context_note": context_text(cfg),
         "environment": environment_text(cfg),
         "transparency": transparency_text(cfg),
         **{k: str(v) for k, v in cfg.spec.prompt_vars.items()},

@@ -12,4 +12,4 @@ def make_provider(cfg: AgentRuntimeConfig):
         from hivemarket.agent.providers.anthropic_provider import AnthropicProvider
         return AnthropicProvider(cfg.spec, route_url, cfg.token)
     from hivemarket.agent.providers.openai_provider import OpenAIProvider
-    return OpenAIProvider(cfg.spec, route_url, cfg.token)
+    return OpenAIProvider(cfg.spec, route_url, cfg.token, cfg.max_tokens_param)

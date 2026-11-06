@@ -15,16 +15,19 @@ class MarketClient:
         self._collector = (collector_url or "").rstrip("/")
         self._h = {"authorization": f"Bearer {token}"}
 
-    async def _req(self, method: str, path: str, base: str | None = None, **kw: Any) -> tuple[int, Any]:
-        r = await self._c.request(method, (base or self._base) + path, headers=self._h, **kw)
+    async def _req(self, method: str, path: str, base: str | None = None, origin: str = "agent",
+                   **kw: Any) -> tuple[int, Any]:
+        # origin=runtime marks requests the runtime makes itself (not the model's actions) in the broker log
+        headers = {**self._h, "x-hivemarket-origin": origin}
+        r = await self._c.request(method, (base or self._base) + path, headers=headers, **kw)
         try:
             body = r.json()
         except ValueError:
             body = {"raw": r.text}
         return r.status_code, body
 
-    async def status(self):
-        return await self._req("GET", "/me")
+    async def status(self, origin: str = "agent"):
+        return await self._req("GET", "/me", origin=origin)
 
     async def graph(self):
         return await self._req("GET", "/graph")

@@ -25,9 +25,17 @@ class AnthropicProvider:
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
         self.system = system
         self.tools = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
-        self.messages.append({"role": "user", "content": first_user})
+        self.messages = [{"role": "user", "content": first_user}]
 
-    async def generate(self) -> Turn:
+    def reset(self, first_user: str) -> None:
+        # A new conversation, never an edited one: preserved thinking stays valid.
+        self.messages = [{"role": "user", "content": first_user}]
+
+    async def summarize(self, instruction: str) -> Turn:
+        self.add_user_text(instruction)
+        return await self.generate(tool_choice={"type": "none"})
+
+    async def generate(self, tool_choice: dict[str, Any] | None = None) -> Turn:
         kwargs: dict[str, Any] = {
             "model": self.spec.model,
             "max_tokens": self.spec.max_tokens,
@@ -36,11 +44,16 @@ class AnthropicProvider:
             "messages": self.messages,
             "cache_control": {"type": "ephemeral"},
         }
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
         if self.spec.thinking == "adaptive":
             # Summaries of the model's reasoning are kept in the trace for analysis.
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-        if self.spec.effort:
+            kwargs["output_config"] = {"effort": self.spec.effort or "high"}
+        elif self.spec.effort:
             kwargs["output_config"] = {"effort": self.spec.effort}
+        if self.spec.extra_body:
+            kwargs["extra_body"] = self.spec.extra_body
         if self.spec.fallbacks:
             kwargs["betas"] = [FALLBACK_BETA]
             kwargs["fallbacks"] = "default"

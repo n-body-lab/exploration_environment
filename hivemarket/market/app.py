@@ -97,6 +97,7 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             response=body,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
             user_agent=request.headers.get("user-agent"),
+            origin=request.headers.get("x-hivemarket-origin", "unknown"),
         )
         if status == 401:
             log.emit("unauthenticated_request", agent_id=ip_agent.id if ip_agent else None,

@@ -53,6 +53,17 @@ class ScriptedProvider:
 
     def start(self, system: str, tools: list[ToolSpec], first_user: str) -> None:
         self.tool_names = {t.name for t in tools}
+        self.turns_in_conversation = 0
+        self.restarts: list[str] = []
+
+    def reset(self, first_user: str) -> None:
+        # A restarted conversation forgets everything but what the runtime passes in.
+        self.turns_in_conversation = 0
+        self.restarts.append(first_user)
+        self._new_round()
+
+    async def summarize(self, instruction: str) -> Turn:
+        return Turn([], text=f"scripted summary: round {self.round}, state {self.state}")
 
     def _call(self, name: str, **args: Any) -> ToolCall:
         return ToolCall(f"call_{next(self._ids)}", name, args)
@@ -69,6 +80,12 @@ class ScriptedProvider:
         return [t for t in task.get("needs", []) if t not in held]
 
     async def generate(self) -> Turn:
+        turn = await self._decide()
+        self.turns_in_conversation += 1
+        turn.usage = {"input_tokens": 500 * self.turns_in_conversation}  # fake context growth for the policy
+        return turn
+
+    async def _decide(self) -> Turn:
         notes, self.notes = self.notes, []
         started = [int(m) for n in notes for m in re.findall(r"Round (\d+) of \d+ has started", n)]
         if started and max(started) > self.round:

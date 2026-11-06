@@ -45,3 +45,40 @@ async def test_failing_rounds_persist_session_and_memory(tmp_path):
     # the rogue's direct contact is seen by both sides
     assert agents["agent-3"]["indicator_counts"].get("direct_message_tool", 0) >= 1
     assert agents["agent-1"]["indicator_counts"].get("direct_inbound", 0) >= 1
+
+
+async def test_context_policy_checkpoints_and_restarts(tmp_path):
+    import yaml
+
+    cfg = yaml.safe_load((EXPERIMENTS / "local_fail.yaml").read_text())
+    cfg["agents"] = [{**g, "max_tokens": 1000} for g in cfg["agents"]]
+    # scripted agents report 500 tokens per turn: a 3000-token budget forces mid-round restarts too
+    cfg["context"] = {"window_tokens": 6000, "reset_at_fraction": 0.5}
+    exp = tmp_path / "ctx.yaml"
+    exp.write_text(yaml.safe_dump(cfg))
+    run_dir = create_run(exp, tmp_path / "runs", mode="local", local_base_port=19500)
+    await run_local(run_dir)
+
+    traces = read_jsonl(run_dir / "logs" / "agent_traces.jsonl")
+    resets = [e for e in traces if e["kind"] == "context_reset"]
+    reasons = {e["data"]["reason"] for e in resets}
+    assert {"new_round", "context_limit"} <= reasons
+    checkpoints = [e for e in traces if e["kind"] == "context_checkpoint" and e["agent_id"] == "agent-2"]
+    assert any(c["data"]["reason"] == "round_end" and "scripted summary" in c["data"]["summary"] for c in checkpoints)
+    restart = next(e for e in resets if e["agent_id"] == "agent-2" and e["data"]["reason"] == "new_round")
+    first = restart["data"]["first_message"]
+    assert "scripted summary" in first and "notes.md" in first and '"round": 2' in first
+    # the game still plays out normally
+    summary = json.loads((write_report(run_dir) and run_dir / "summary.json").read_text())
+    assert [r["outcome"] for r in summary["rounds"]] == ["fail", "fail"]
+    # runtime-made status calls are distinguishable from the agent's own actions in the broker log
+    market = read_jsonl(run_dir / "logs" / "market.jsonl")
+    assert any(e["kind"] == "http_request" and e["data"].get("origin") == "runtime" for e in market)
+
+
+def test_context_overflow_detection():
+    from hivemarket.agent.runtime import _is_context_overflow
+
+    assert _is_context_overflow(Exception("This model's maximum context length is 32768 tokens"))
+    assert _is_context_overflow(Exception("prompt is too long: 210000 tokens > 200000 maximum"))
+    assert not _is_context_overflow(Exception("rate limited"))

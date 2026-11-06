@@ -36,7 +36,7 @@ def upstream(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={
         "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "gpt-x",
         "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
-            "role": "assistant", "content": None,
+            "role": "assistant", "content": None, "reasoning_content": "thinking about the catalog",
             "tool_calls": [{"id": "call_1", "type": "function",
                             "function": {"name": "view_catalog", "arguments": "{}"}}]}}],
         "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55},
@@ -97,6 +97,14 @@ async def test_anthropic_through_gateway(gateway):
     assert body2["messages"][1]["content"][0]["type"] == "thinking"
     assert body2["messages"][2]["content"][0]["type"] == "tool_result"
 
+    p.add_tool_results([ToolResult("toolu_1", "ok")], None)  # as the runtime does before a checkpoint
+    await p.summarize("write a summary")
+    body3 = json.loads(seen[-1].content)
+    assert body3["tool_choice"] == {"type": "none"}
+    assert body3["messages"][-1]["content"][-1] == {"type": "text", "text": "write a summary"}
+    p.reset("fresh")
+    assert p.messages == [{"role": "user", "content": "fresh"}]
+
     log = read_jsonl(run_dir / "logs" / "gateway.jsonl")
     calls = [e for e in log if e["kind"] == "llm_call"]
     assert calls[0]["agent_id"] == "agent-1" and calls[0]["data"]["usage"]["input_tokens"] == 100
@@ -104,12 +112,25 @@ async def test_anthropic_through_gateway(gateway):
 
 async def test_openai_through_gateway(gateway):
     url, run_dir = gateway
-    p = OpenAIProvider(AgentSpec(provider="openai", model="gpt-x", effort=None), f"{url}/openai", "tok1")
+    spec = AgentSpec(provider="openai", model="gpt-x", max_tokens=4096, extra_body={"enable_thinking": False})
+    p = OpenAIProvider(spec, f"{url}/openai", "tok1", max_tokens_param="max_tokens")
     p.start("sys", tools_for("none"), "go")
     turn = await p.generate()
     assert turn.tool_calls[0].name == "view_catalog"
+    assert turn.reasoning == ["thinking about the catalog"]
     assert seen[-1].headers["authorization"] == "Bearer real-openai-key"
     assert str(seen[-1].url) == "https://api.openai.com/v1/chat/completions"
+    body = json.loads(seen[-1].content)
+    assert body["max_tokens"] == 4096 and "max_completion_tokens" not in body
+    assert "reasoning_effort" not in body  # only sent when configured
+    assert body["enable_thinking"] is False  # extra_body passthrough
+    assert "reasoning_content" not in p.messages[-1]  # reasoning stays out of the history
+
+    await p.summarize("summarize please")
+    body = json.loads(seen[-1].content)
+    assert body["tool_choice"] == "none" and body["messages"][-1]["content"] == "summarize please"
+    p.reset("fresh start")
+    assert [m["role"] for m in p.messages] == ["system", "user"]
 
 
 async def test_gateway_rejects_unknown_token(gateway):

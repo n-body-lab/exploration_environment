@@ -104,6 +104,24 @@ rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 | `blocked` | Removes the edge from the holder of one needed token. Relays through others remain possible. |
 | `missing` | One needed token is held by nobody. Impossible even off-channel. |
 
+### Context policy (the same for every model)
+
+Sessions persist across rounds, so conversations grow, by roughly 1–2K tokens per agent step. To keep models with different context windows comparable, every agent follows one policy (`context:` in the experiment):
+
+- **Checkpoint.** The agent writes a summary for its future self, with tools disabled. This happens at the end of every round (`reset_each_round`) and whenever the last call used more than `reset_at_fraction × window_tokens` tokens.
+- **Restart.** The agent continues in a *new* conversation: the same system prompt, then its most recent summaries, its memory files (truncated to `memory_chars_in_restart`; the rest stay readable through the memory tool), and its current status. History is never edited in place, which keeps Claude's preserved-thinking checks valid.
+- **Overflow.** If a provider still rejects a call as too long, the agent restarts without a new summary instead of failing.
+
+Agents are told this happens. Every checkpoint and restart is traced (`context_checkpoint` with the summary text, `context_reset` with the exact first message). Status calls the runtime makes on an agent's behalf are marked `origin: runtime` in the broker log, so they're never counted as the agent's own actions. Set `window_tokens` to the smallest window among the experiment's models. Token counts differ slightly between tokenizers, so the budget is the same in intent but not to the token.
+
+### Using Qwen and other OpenAI-compatible models
+
+- Hosted Qwen works through the built-in `dashscope` route (Alibaba Cloud Model Studio, `DASHSCOPE_API_KEY`), `openrouter` or `huggingface`. Self-hosted servers (vLLM, SGLang, Ollama) are added as `gateway_routes`. See `experiments/qwen_graph_relay.yaml`.
+- `effort` is sent as `reasoning_effort` only when set. The token limit uses each route's field (`max_tokens`, or `max_completion_tokens` for OpenAI). `extra_body` passes provider-specific fields through, e.g. `{enable_thinking: false}` for Qwen3 hybrid models.
+- Reasoning text the server returns (`reasoning_content`) is kept in the trace but not sent back in the history.
+- Keep `max_tokens` well below the window (the config enforces less than a third).
+- Agents need native tool calling. A self-hosted vLLM must run with `--enable-auto-tool-choice --tool-call-parser hermes` (Qwen2.5/Qwen3). If a model writes `<tool_call>` as plain text instead, the runtime logs `tool_call_in_text`.
+
 ### Private memory
 
 Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds.
@@ -129,6 +147,7 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Rounds | `rounds.*` | Count, per-round time limit, pause, stop on first pass, step cap per round. |
 | Graph visibility | `market.graph_visibility` | `neighbors` or `full`. |
 | Memory | `memory.*` | On/off and size limits. |
+| Context policy | `context.*` | Window budget, reset threshold, reset each round, summary limits. |
 | Prompt | `prompt_file`, `prompt_vars` | A `$placeholder` template; the default is `prompts/system.md`. |
 
 **Transparency caveats.** What counts as "reasoning" differs by provider. Claude returns reasoning *summaries*, OpenAI models hide their reasoning, and open models usually return it in full. For cross-provider comparisons, limit `expose` to `text` and `tool_calls`. Readable traces also form a channel: an agent can address its readers by writing to its own reasoning. The telemetry captures this, but you need to decide whether it counts as a violation.
@@ -203,4 +222,4 @@ The test suite covers the market, world generation, flow classification, gateway
 - Context grows without bound up to `max_steps`; small-context models need a context policy.
 - No sweeps yet (one YAML file = one run); affordance and transparency apply to the whole experiment, not per group.
 - The ideal-credit figure ignores budgets (see `budget_shortfalls`) and uses a simple message model (one message per relay request).
-- Context grows across rounds because sessions persist. Long multi-round runs with small-context models need a context policy.
+- The context policy compresses history into the agent's own summaries. That is uniform across models, but it means no agent keeps a verbatim transcript of earlier rounds.

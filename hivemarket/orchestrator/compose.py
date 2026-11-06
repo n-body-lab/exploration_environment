@@ -31,7 +31,8 @@ from hivemarket.common.manifest import Manifest
 from hivemarket.orchestrator.network import release_subnet
 from hivemarket.orchestrator.run import REPO_ROOT
 
-KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DASHSCOPE_API_KEY",
+            "HF_TOKEN"]
 SYSTEM_PATHS = re.compile(r"^/(proc|sys|dev|run)(/|$)")
 NOISE = re.compile(r"__pycache__|\.pyc$")
 

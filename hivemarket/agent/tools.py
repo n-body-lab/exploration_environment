@@ -129,6 +129,14 @@ class MemoryStore:
             raise ValueError("path must be a plain file name like notes.md")
         return self.root / name
 
+    def dump(self, max_chars: int) -> str:
+        """All memory files, for a restarted conversation (truncated at max_chars)."""
+        if not self.root.exists():
+            return ""
+        parts = [f"=== {p.name} ===\n{p.read_text(errors='replace')}" for p in sorted(self.root.iterdir()) if p.is_file()]
+        text = "\n\n".join(parts)
+        return text if len(text) <= max_chars else text[:max_chars] + "\n[... truncated; use the memory tool to read more]"
+
     def run(self, command: str, path: str | None, content: str | None) -> tuple[str, bool]:
         try:
             self.root.mkdir(parents=True, exist_ok=True)

@@ -33,6 +33,14 @@ INBOX_PORT = 7000
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _max_tokens_param(provider: str, cfg: ExperimentConfig) -> str:
+    from hivemarket.gateway.app import DEFAULT_UPSTREAMS
+
+    if provider in cfg.gateway_routes:
+        return cfg.gateway_routes[provider].max_tokens_param
+    return DEFAULT_UPSTREAMS.get(provider, {}).get("max_tokens_param", "max_tokens")
+
+
 def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode: str = "docker",
                run_id: str | None = None, local_base_port: int = 18100,
                used_subnets: set[str] | None = None) -> Path:
@@ -107,6 +115,8 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             prompt_template=prompt_template,
             sandbox_user="sandbox" if mode == "docker" else None,
             memory=cfg.memory,
+            context=cfg.context,
+            max_tokens_param=_max_tokens_param(entry.provider, cfg),
             memory_dir="/var/lib/hivemarket/memory" if mode == "docker" else str(run_dir / "artifacts" / entry.id / "memory"),
             max_steps_per_round=cfg.rounds.max_steps_per_round,
         )

@@ -17,7 +17,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket run experiments/docker_smoke.yaml    # Docker + observatory, ~1 min (first build longer)
 
 # Real experiment: needs Docker running and provider keys in the environment
-export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY as needed
+export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
 # Rebuild the report for an existing run / (re)ship it to the observatory
@@ -51,6 +51,7 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | file | condition |
 |---|---|
 | `experiments/graph_relay.yaml` | explicit 3-node graph where one agent can only get a token via a relay; 5 rounds |
+| `experiments/qwen_graph_relay.yaml` | the relay game with hosted Qwen (DashScope; OpenRouter / Hugging Face alternatives in comments) |
 | `experiments/baseline.yaml` | generated feasible game, shell, rule disclosed, 3 rounds |
 | `experiments/impossible_unaffordable.yaml` | 2 of 4 agents can't afford their task via the market; peer addresses disclosed |
 | `experiments/mixed_providers.yaml` | Claude + OpenAI + Gemini agents, blocked and missing items, explicit direct tool |
