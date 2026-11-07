@@ -133,3 +133,90 @@ async def test_page_model_against_a_real_run(finished_run, tmp_path):
                        env={"HM_FIXTURE": str(path), "PATH": "/usr/local/bin:/usr/bin:/bin"},
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ------------------------------------------------------------ warehouse (charts and SQL tabs)
+
+class FakeClickHouse:
+    """Records what the observer sends; answers like ClickHouse's JSONCompact output."""
+
+    def __init__(self):
+        self.calls = []
+
+    def ping(self):
+        return True
+
+    def execute(self, sql, body=None, settings=None):
+        self.calls.append((sql, settings))
+        if "system.columns" in sql:
+            data = [["v_rounds", "run_id", "String"], ["v_rounds", "round", "UInt32"], ["runs", "run_id", "String"]]
+            meta = [{"name": "table", "type": "String"}, {"name": "name", "type": "String"}, {"name": "type", "type": "String"}]
+        elif "boom" in sql:
+            raise RuntimeError("ClickHouse error 500: Code: 47. Unknown identifier boom")
+        else:
+            data = [["r1", 1], ["r1", 2]]
+            meta = [{"name": "run_id", "type": "String"}, {"name": "round", "type": "UInt32"}]
+        return json.dumps({"meta": meta, "data": data, "rows": len(data), "statistics": {"elapsed": 0.002, "rows_read": 9}})
+
+
+@pytest.mark.parametrize("sql, error", [
+    ("INSERT INTO hivemarket.runs VALUES (1)", "Only SELECT"),
+    ("DROP TABLE hivemarket.events", "Only SELECT"),
+    ("SELECT 1; DROP TABLE hivemarket.events", "One statement"),
+    ("SELECT 1 FORMAT CSV", "Leave out FORMAT"),
+    ("   ", "Empty"),
+])
+def test_sql_guard_rejects_anything_but_one_read(sql, error):
+    from hivemarket.ui.warehouse import QueryError, check_sql
+    with pytest.raises(QueryError, match=error):
+        check_sql(sql)
+    assert check_sql("  with x as (select 1) select * from x;  ") == "with x as (select 1) select * from x"
+
+
+async def test_sql_endpoints(tmp_path):
+    from hivemarket.ui.warehouse import Warehouse
+    fake = FakeClickHouse()
+    app = create_app(tmp_path, warehouse=Warehouse(fake, grafana_url="http://grafana.test"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ui") as c:
+        r = await c.post("/api/sql", json={"sql": "SELECT run_id, round FROM hivemarket.v_rounds", "limit": 50})
+        body = r.json()
+        assert r.status_code == 200 and body["rows"] == [["r1", 1], ["r1", 2]]
+        assert [m["name"] for m in body["columns"]] == ["run_id", "round"] and body["elapsed_s"] == 0.002
+        sql, settings = fake.calls[-1]
+        assert sql.endswith("FORMAT JSONCompact")
+        assert settings["readonly"] == 1 and settings["max_result_rows"] == 50 and settings["max_execution_time"] == 30
+        r = await c.post("/api/sql", json={"sql": "DELETE FROM hivemarket.events WHERE 1"})
+        assert r.status_code == 400 and "Only SELECT" in r.json()["error"] and len(fake.calls) == 1  # never sent
+        r = await c.post("/api/sql", json={"sql": "SELECT boom"})
+        assert r.status_code == 400 and "Unknown identifier boom" in r.json()["error"]
+        schema = (await c.get("/api/sql/schema")).json()
+        assert schema == [{"table": "v_rounds", "columns": [{"name": "run_id", "type": "String"},
+                                                             {"name": "round", "type": "UInt32"}]},
+                          {"table": "runs", "columns": [{"name": "run_id", "type": "String"}]}]
+        examples = (await c.get("/api/sql/examples")).json()
+        assert examples and all("{run_id}" in x["sql"] or "across runs" in x["title"] or x["title"] == "All runs"
+                                for x in examples)
+        status = (await c.get("/api/observatory")).json()
+        assert status["clickhouse"] is True and status["grafana"] is False  # grafana.test doesn't exist
+        assert status["grafana_url"] == "http://grafana.test" and status["dashboard_uid"] == "hivemarket-run"
+
+
+async def test_example_queries_run_on_a_real_engine(tmp_path):
+    """Every example query is valid against the real warehouse schema (chDB), with {run_id} filled in."""
+    chdb_session = pytest.importorskip("chdb.session")
+    from hivemarket.observatory.schema import STATEMENTS
+    from hivemarket.ui.warehouse import EXAMPLES, check_sql
+    s = chdb_session.Session(str(tmp_path / "ch"))
+    s.query("CREATE DATABASE IF NOT EXISTS hivemarket")
+    for stmt in STATEMENTS:
+        s.query(stmt)
+    for title, sql in EXAMPLES:
+        s.query(check_sql(sql.replace("{run_id}", "'r1'")) + " FORMAT JSONCompact")  # raises if invalid
+
+
+def test_clickhouse_errors_are_readable():
+    from hivemarket.ui.warehouse import _clickhouse_message
+    wrapped = ('ClickHouse error 500: {\n\t"meta": [],\n\t"rows": 0,\n\t"exception": "Code: 164. DB::Exception: '
+               'Cannot modify \'readonly\' setting in readonly mode. (READONLY) (version 25.8.1.1)"\n}')
+    assert _clickhouse_message(wrapped) == "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)"
+    assert _clickhouse_message("ClickHouse error 500: Code: 47. Unknown identifier x (version 25.8)") == "Code: 47. Unknown identifier x"

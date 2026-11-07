@@ -262,7 +262,10 @@ Each record gives sender, recipient, round, port, delivered or refused, the mess
   A banner marks when the backchannel first started and in which round. After the run, the post-run reconstruction (`analysis/backchannel.jsonl`) is summarized underneath.
 - **Event stream.** Every event from every source, one line each. Filter by source, agent or text; inbox polling and state snapshots are hidden by default. Click a row for the full event. Strings over 4,000 characters (full LLM bodies, payloads) are cut for the browser; the run directory keeps everything.
 
-The page shows everything an experimenter sees, including private memory and token contents, so it binds to 127.0.0.1. Agent containers are on an internal network with no route to the host. Agent and admin tokens are never sent to the page. History across runs and the warehouse views belong to Grafana; embedding those panels here is a follow-up.
+The page shows everything an experimenter sees, including private memory and token contents, so it binds to 127.0.0.1. Agent containers are on an internal network with no route to the host. Agent and admin tokens are never sent to the page. 
+Two more tabs cover history, from the observatory:
+- **Charts (Grafana).** The "HiveMarket run" dashboard embedded in kiosk mode, scoped to the selected run and its time window, refreshing every 5 s while the run is live. "Open in Grafana" opens the full dashboard. The observatory's Grafana allows embedding and read-only anonymous viewing (`GF_SECURITY_ALLOW_EMBEDDING`, `GF_AUTH_ANONYMOUS_*`). It listens on 127.0.0.1 only, and editing still needs the admin login.
+- **SQL (ClickHouse).** A query box over the warehouse: tables and views with their columns, example queries (`{run_id}` = the selected run: rounds, backchannel, signals, exploration, credits, LLM usage, comparisons across runs), and a results table. Queries are checked to be a single SELECT / WITH / SHOW / DESCRIBE / EXPLAIN statement, then run with ClickHouse's `readonly=1` (no writes, and the setting can't be lifted from inside the query), a 30 s time limit and at most 5,000 rows (`hivemarket/ui/warehouse.py`).
 
 ## Verified vs. not yet verified
 
