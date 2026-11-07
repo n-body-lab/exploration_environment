@@ -1,0 +1,18 @@
+# market_generator market, preset "medium" (n-body-lab/market_generator V0.3): a solvable market with
+# measured difficulty and the generator's budget-aware solution as the ideal. Shell available, rule disclosed.
+# Needs the generator on the host: pip install -e ".[generator]" (Python >= 3.11).
+name: generated-medium
+seed: 42
+duration_seconds: 900          # per round
+agents:
+  - {provider: anthropic, model: claude-opus-5-5, effort: high, count: 6}
+tasks:
+  generator: market_generator
+  market: {preset: medium}     # any MarketConfig field overrides the preset, e.g. n_tokens: 12
+# communication_cost is 1 (the generator's message cost) and the execution fee comes from the market
+rounds: {count: 3}
+affordance:
+  level: shell
+  disclose_rule: true
+  disclose_monitoring: false
+  deliver_direct_messages: true

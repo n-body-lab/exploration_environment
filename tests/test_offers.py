@@ -1,6 +1,7 @@
 """Trading: OFFER (taxed demand signal), SELL / BUY (two-phase commit), WITHDRAW, and the event order."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -284,3 +285,62 @@ async def test_concurrent_requests_are_applied_one_at_a_time(market):
             assert evs[i + 1]["kind"] == "graph_state" and evs[i + 1]["data"]["offer_id"] == oid
             assert evs[i + 2]["kind"] == "notice" and evs[i + 2]["data"]["offer_id"] == oid
     assert b.credits["z"] == 8 and b.credits["w"] == 8
+
+
+# ------------------------------------------------- messages: off by default (spec §4.3, §5.2)
+
+async def test_free_text_messages_are_off_by_default(market):
+    b = market
+    with pytest.raises(MarketError) as e:
+        await b.send_message("z", "x", "I need T, who has it?")
+    assert e.value.code == "messages_disabled" and "make offers" in e.value.message
+    assert b.credits["z"] == 10 and not b.messages  # nothing charged, nothing delivered
+    assert b.status("z")["messages_enabled"] is False and b.status("z")["communication_cost"] is None
+    assert "communication_cost_per_message" not in b.graph_view("z")
+
+
+async def test_message_cost_doesnt_count_as_an_action_when_messages_are_off(tmp_path):
+    """With messages off, an agent that can't afford an offer has nothing left to do."""
+    b = broker(tmp_path, comm=1, tax=3)
+    await b.begin()
+    b.credits.update({"x": 2, "y": 2, "w": 2, "z": 2})  # enough for a message, not for an offer
+    await b._check_progress()
+    assert b.phase != "active" and b.results[0]["reason"] == "no agent can afford any action"
+
+
+def test_agents_only_get_messages_when_enabled():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.agent.tools import tools_for_config
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+    from hivemarket.common.paths import repo_root
+
+    template = (repo_root() / "prompts" / "system.md").read_text()
+    base = dict(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c", gateway_url="g",
+                provider_kind="scripted", spec=AgentSpec(provider="scripted"), affordance=AffordanceConfig(level="none"),
+                prompt_template=template)
+    status = {"participants": ["a", "b"], "communication_cost": 2, "offer_tax": 1, "sale_timeout_seconds": 90}
+    off = AgentRuntimeConfig(**base)
+    on = AgentRuntimeConfig(**base, messages=True)
+    assert "send_message" not in {t.name for t in tools_for_config(off)}
+    assert "send_message" in {t.name for t in tools_for_config(on)}
+    p_off, p_on = render_system_prompt(off, status), render_system_prompt(on, status)
+    assert "send_message" not in p_off and "no free-text messages" in p_off and "$" not in p_off
+    assert "`send_message`" in p_on and "burns 2 credit(s) per recipient" in p_on
+
+
+def test_experiment_setting_reaches_the_world_and_agents(tmp_path):
+    import json
+    import yaml
+    from hivemarket.orchestrator.run import create_run
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "experiments" / "local_smoke.yaml").read_text())
+    for messages in (None, True):
+        if messages is not None:
+            cfg["market"] = {"messages": messages}
+        path = tmp_path / f"exp-{messages}.yaml"
+        path.write_text(yaml.safe_dump(cfg))
+        run = create_run(path, tmp_path / "runs", mode="local", run_id=f"r-{messages}")
+        world = json.loads((run / "world.json").read_text())
+        agent = json.loads((run / "agents" / "agent-1.json").read_text())
+        assert world["rules"]["messages"] is bool(messages) and agent["messages"] is bool(messages)

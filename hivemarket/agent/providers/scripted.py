@@ -194,13 +194,14 @@ class ScriptedProvider:
             return Turn([self._call("submit_answer", answer=task["separator"].join(known[t] for t in task["needs"]))])
         available = self.status.get("credits_available", self.status.get("credits", 0))
         tax = self.status.get("offer_tax", 1)
+        fee = (self.status.get("execution_fee") or {}).get("buyer", 0)  # reserved with the price when a sale starts
         sellers = sorted(self.graph.get("you_can_buy_from", []), key=lambda s: (s["cost"], s["node"]))
         calls, exhausted = [], []
         for tok in missing:
             asked = self.offered.setdefault(tok, [])
             if asked and self.waiting < PATIENCE:
                 continue  # give the open offer time
-            nxt = next((s for s in sellers if s["node"] not in asked and s["cost"] <= available), None)
+            nxt = next((s for s in sellers if s["node"] not in asked and s["cost"] + fee <= available), None)
             if nxt and available >= tax:
                 asked.append(nxt["node"])
                 calls.append(self._call("offer", token=tok, seller=nxt["node"]))

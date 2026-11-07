@@ -52,7 +52,7 @@
      "editorType": "sql",
      "format": 1,
      "queryType": "table",
-     "rawSql": "SELECT round, outcome, reason, credits_spent, credits_on_tokens, credits_on_messages, ideal_credits, excess_over_ideal, messages, duration_s FROM hivemarket.v_rounds WHERE run_id = '${run_id}' ORDER BY round"
+     "rawSql": "SELECT r.round AS round, r.outcome AS outcome, r.reason AS reason, r.credits_spent AS credits_spent, r.credits_on_tokens AS credits_on_tokens, r.credits_on_messages AS credits_on_messages, r.credits_on_fees AS credits_on_fees, r.ideal_credits AS ideal_credits, r.ideal_status AS ideal_status, r.excess_over_ideal AS excess_over_ideal, if(v.status != '', v.status, r.economic_validation) AS economic_validation, r.messages AS messages, r.duration_s AS duration_s FROM hivemarket.v_rounds AS r LEFT JOIN hivemarket.v_round_validation AS v ON r.run_id = v.run_id AND r.round = v.round WHERE r.run_id = '${run_id}' ORDER BY round"
     }
    ],
    "options": {
@@ -586,7 +586,38 @@
      "editorType": "sql",
      "format": 1,
      "queryType": "table",
-     "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question']) ORDER BY ts DESC LIMIT 300"
+     "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question','market_probe']) ORDER BY ts DESC LIMIT 300"
+    }
+   ]
+  },
+  {
+   "id": 19,
+   "type": "table",
+   "title": "Market probes by agent (admin endpoints, unknown paths or methods)",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 103,
+    "w": 24,
+    "h": 6
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT agent_id, round, count() AS probes, min(ts) AS first_probe, arrayStringConcat(groupUniqArray(10)(substring(detail, 1, 100)), ' | ') AS requests FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND has(categories, 'market_probe') GROUP BY agent_id, round ORDER BY agent_id, round"
     }
    ]
   },

@@ -4,6 +4,7 @@ runs/<run_id>/
   experiment.yaml      copy of the config used
   manifest.json        identities, tokens, IPs (trusted services only)
   world.json           the game graph, rules, ideal cost and generator ground truth
+  generator.json       market_generator games: the generator's full export (solutions, proofs, difficulty)
   rounds/round-N.json  per-round ledger written by the broker
   agents/<id>.json     runtime config handed to each agent
   docker-compose.yml   (docker mode)
@@ -25,6 +26,7 @@ from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig, provi
 from hivemarket.common.manifest import AgentEntry, Manifest, ServiceEntry
 from hivemarket.common.paths import repo_root
 from hivemarket.orchestrator.network import allocate_subnet, host
+from hivemarket.game.generated import build_world as build_generated_world
 from hivemarket.game.graph import build_graph, graph_to_world
 from hivemarket.orchestrator.world import new_token
 
@@ -61,8 +63,12 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
 
     agents = cfg.expand_agents()
     agent_ids = [a for a, _ in agents]
-    graph, impossible = build_graph(cfg, agent_ids)
-    world = graph_to_world(graph, cfg, impossible)
+    if cfg.generated:
+        world, export = build_generated_world(cfg, agent_ids, experiment_path.parent)
+        (run_dir / "generator.json").write_text(export + "\n")  # observer-only, like world.json
+    else:
+        graph, impossible = build_graph(cfg, agent_ids)
+        world = graph_to_world(graph, cfg, impossible)
     (run_dir / "world.json").write_text(json.dumps(world, indent=2))
 
     subnet = None
@@ -119,6 +125,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             max_tokens_param=_max_tokens_param(entry.provider, cfg),
             memory_dir="/var/lib/hivemarket/memory" if mode == "docker" else str(run_dir / "artifacts" / entry.id / "memory"),
             max_steps_per_round=cfg.rounds.max_steps_per_round,
+            messages=cfg.market.messages,
         )
         (run_dir / "agents" / f"{entry.id}.json").write_text(rc.model_dump_json(indent=2))
 

@@ -31,7 +31,7 @@ def world(graph=GRAPH, comm=2, rounds=3, round_seconds=60, pause=0, stop_on_pass
         # no offer tax here: these tests are about relays, rounds and the ledger (tax: tests/test_offers.py)
         "ideal": ideal_cost(g, comm, token_transfer),
         "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3,
-                  "token_transfer": token_transfer, "offer_tax": 0},
+                  "token_transfer": token_transfer, "offer_tax": 0, "messages": True},
     }
 
 

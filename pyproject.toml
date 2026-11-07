@@ -20,6 +20,9 @@ agent = ["anthropic>=2.0", "openai>=1.40"]
 monitor = ["dpkt>=1.9", "inotify_simple>=1.3"]
 observatory = ["minio>=7.2"]
 analysis = ["numpy>=1.24", "fastembed>=0.3"]
+# market_generator games (tasks.generator: market_generator); needed on the host only, not in the images.
+# Not on PyPI: pinned to V0.3 (ad0fb8c). It needs Python >= 3.11; hivemarket itself still supports 3.10.
+generator = ["hivemarket-generator @ git+https://github.com/n-body-lab/market_generator.git@ad0fb8c0e471373d1c387ff4f8e8b726e89b8eb2 ; python_version >= '3.11'"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "anthropic>=2.0", "openai>=1.40", "dpkt>=1.9", "minio>=7.2", "chdb>=3", "numpy>=1.24"]
 
 [project.scripts]

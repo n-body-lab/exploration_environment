@@ -106,17 +106,55 @@ class ImpossibleSpec(BaseModel):
     count: int = 0  # pick this many agents at random if `agents` is empty
 
 
+SECRET_ASSEMBLY_FIELDS = ("pieces_per_task", "decoys_per_agent", "starting_balance", "edge_cost")
+MARKET_GENERATOR_FIELDS = ("market", "family", "file", "fragility")
+GENERATED_IMPOSSIBLE_MODES = ("unaffordable", "unaffordable_strict")
+
+
 class TaskConfig(BaseModel):
-    """Generated game (used when no explicit `graph` is given); compiled into a graph."""
+    """Generated game (used when no explicit `graph` is given); compiled into a graph.
+
+    secret_assembly   our own generator: a complete graph at one `edge_cost`.
+    market_generator  n-body-lab/market_generator (hivemarket/game/generated.py), from one of:
+                        market  MarketConfig fields (plus `preset: easy|medium|hard`); the agent
+                                count and `seed` come from the experiment
+                        family  an economic family, e.g. goal_relevant_fragile
+                        file    a market exported by the generator, relative to the experiment file
+                      none of them means the generator's default MarketConfig.
+    """
 
     model_config = {"extra": "forbid"}
 
-    generator: Literal["secret_assembly"] = "secret_assembly"
+    generator: Literal["secret_assembly", "market_generator"] = "secret_assembly"
+    # secret_assembly
     pieces_per_task: int = 2
     decoys_per_agent: int = 1
     starting_balance: int = 100
     edge_cost: int = 15  # cost on every generated edge (complete graph)
+    # market_generator (keys of `market` are checked against the generator's MarketConfig when the run is built)
+    market: dict[str, Any] | None = None
+    family: str | None = None
+    file: str | None = None
+    fragility: bool = False  # run analyse_fragility when the market is generated (can be slow)
     impossible: list[ImpossibleSpec] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check(self) -> "TaskConfig":
+        # By value, not by whether a field was given, so a config's own model_dump() validates again.
+        defaults = {f: type(self).model_fields[f].default for f in SECRET_ASSEMBLY_FIELDS + MARKET_GENERATOR_FIELDS}
+        other = MARKET_GENERATOR_FIELDS if self.generator == "secret_assembly" else SECRET_ASSEMBLY_FIELDS
+        if used := [f for f in other if getattr(self, f) != defaults[f]]:
+            owner = "market_generator" if self.generator == "secret_assembly" else "secret_assembly"
+            raise ValueError(f"{', '.join(used)} only apply to generator: {owner}")
+        if self.generator == "secret_assembly":
+            return self
+        if sum(x is not None for x in (self.market, self.family, self.file)) > 1:
+            raise ValueError("give at most one of market, family and file")
+        if bad := sorted({s.mode for s in self.impossible} - set(GENERATED_IMPOSSIBLE_MODES)):
+            raise ValueError(f"impossible mode(s) {', '.join(bad)} can't be expressed in a generated market "
+                             "(complete graph, every token held by exactly one agent); use "
+                             f"{' or '.join(GENERATED_IMPOSSIBLE_MODES)}")
+        return self
 
 
 NODE_NAME = r"^[a-z][a-z0-9-]{0,30}$"  # node names become agent ids, hostnames and service names
@@ -187,6 +225,21 @@ class RoundsConfig(BaseModel):
     max_steps_per_round: int | None = None  # LLM calls per agent per round; default spec.max_steps
 
 
+class ExecutionFee(BaseModel):
+    """Credits burned (paid to nobody) on every completed sale, by each side, on top of the price.
+
+    Both sides must be able to afford their part before the trade: when the seller SELLs, the
+    buyer's is reserved with the price and the seller's is reserved too; both are burned on BUY.
+    In a market_generator game the offer tax plays the generator's first buyer execution messages,
+    so this carries the rest: buyer = buyer messages - offer_tax (at least 0), seller = seller messages.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    buyer: int = Field(0, ge=0)
+    seller: int = Field(0, ge=0)
+
+
 class MarketConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -202,6 +255,13 @@ class MarketConfig(BaseModel):
     # BUY before the reservation is released and the offer goes back to open.
     offer_tax: int = Field(1, ge=0)
     sale_timeout_seconds: float = Field(90.0, gt=0)
+    # Free-text broker messages (send_message), at `communication_cost` per recipient. Off by default:
+    # in the game spec, offers are the only legitimate communication (§4.3, §5.2). Turning them on is
+    # an experimental condition: agents can then describe needs in plain language, and lie.
+    messages: bool = False
+    # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
+    # comes from the market itself; set it only to check it matches.
+    execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
 
 
 class MemoryConfig(BaseModel):
@@ -250,8 +310,9 @@ class ExperimentConfig(BaseModel):
     agents: list[AgentGroup]
     affordance: AffordanceConfig = Field(default_factory=AffordanceConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
-    graph: GraphSpec | None = None  # explicit game; overrides `tasks`
-    communication_cost: int = Field(default=0, ge=0)  # credits burned by the sender per message per recipient
+    graph: GraphSpec | None = None  # explicit game; overrides `tasks` (except a market_generator game)
+    # per message per recipient, when market.messages is on; 1 (and only 1) for market_generator games
+    communication_cost: int = Field(default=0, ge=0)
     rounds: RoundsConfig = Field(default_factory=RoundsConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
@@ -273,7 +334,27 @@ class ExperimentConfig(BaseModel):
             if g.max_tokens > self.context.window_tokens // 3:
                 raise ValueError(f"max_tokens {g.max_tokens} is too large for context.window_tokens "
                                  f"{self.context.window_tokens}; keep it under a third of the window")
+        if self.tasks.generator == "market_generator":
+            self._check_generated()
         return self
+
+    def _check_generated(self) -> None:
+        """A market_generator game runs under the generator's rules: unique tokens, and 1-credit messages
+        (an offer's tax is `offer_tax` of them, and each recipient of a free-text message is one when those
+        are on). Any offer tax works: hivemarket.game.generated.played_market adapts the market to it."""
+        if self.graph:
+            raise ValueError("graph: and a market_generator game are exclusive; remove one")
+        if self.market.token_transfer != "move":
+            raise ValueError("market_generator markets have unique tokens: market.token_transfer must be move")
+        if "communication_cost" not in self.model_fields_set:
+            self.communication_cost = 1
+        elif self.communication_cost != 1:
+            raise ValueError("market_generator charges exactly 1 credit per message recipient: "
+                             "set communication_cost: 1 or leave it out")
+
+    @property
+    def generated(self) -> bool:
+        return self.graph is None and self.tasks.generator == "market_generator"
 
     @property
     def round_seconds(self) -> float:
@@ -331,6 +412,7 @@ class AgentRuntimeConfig(BaseModel):
     max_tokens_param: str = "max_tokens"
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
+    messages: bool = False  # market.messages: whether the agent gets the send_message tool
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30
