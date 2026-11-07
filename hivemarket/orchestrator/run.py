@@ -23,6 +23,7 @@ import yaml
 
 from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig, provider_kind
 from hivemarket.common.manifest import AgentEntry, Manifest, ServiceEntry
+from hivemarket.common.paths import repo_root
 from hivemarket.orchestrator.network import allocate_subnet, host
 from hivemarket.game.graph import build_graph, graph_to_world
 from hivemarket.orchestrator.world import new_token
@@ -30,7 +31,6 @@ from hivemarket.orchestrator.world import new_token
 SERVICE_OCTETS = {"market": 10, "gateway": 11, "collector": 12}
 FIRST_AGENT_OCTET = 101
 INBOX_PORT = 7000
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _max_tokens_param(provider: str, cfg: ExperimentConfig) -> str:
@@ -55,7 +55,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     (run_dir / "agents").mkdir()
     shutil.copy(experiment_path, run_dir / "experiment.yaml")
 
-    prompt_path = (experiment_path.parent / cfg.prompt_file) if cfg.prompt_file else REPO_ROOT / "prompts" / "system.md"
+    prompt_path = (experiment_path.parent / cfg.prompt_file) if cfg.prompt_file else repo_root() / "prompts" / "system.md"
     prompt_template = prompt_path.read_text()
     shutil.copy(prompt_path, run_dir / "system_prompt_template.md")
 

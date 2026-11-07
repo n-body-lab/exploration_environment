@@ -5,3 +5,5 @@ __pycache__/
 runs/
 *.egg-info/
 .env
+build/
+dist/

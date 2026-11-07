@@ -29,7 +29,7 @@ from hivemarket.common.config import ExperimentConfig
 from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
 from hivemarket.orchestrator.network import release_subnet
-from hivemarket.orchestrator.run import REPO_ROOT
+from hivemarket.common.paths import repo_root
 
 KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DASHSCOPE_API_KEY",
             "HF_TOKEN"]
@@ -42,7 +42,7 @@ def project_name(run_dir: Path) -> str:
 
 
 def _build(target: str) -> dict[str, Any]:
-    return {"context": str(REPO_ROOT), "dockerfile": "docker/Dockerfile", "target": target}
+    return {"context": str(repo_root()), "dockerfile": "docker/Dockerfile", "target": target}
 
 
 def _escape(value: str) -> str:

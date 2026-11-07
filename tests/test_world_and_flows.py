@@ -91,3 +91,21 @@ def test_flow_tracker_flags_peer_contact_and_payload():
     assert peer_flow["payload_out"] == "give me P-07" and peer_flow["established"]
     assert any(f["remote_name"] == "market" and not f["off_channel"] for f in flows)
     assert ("dns_query", {"queries": ["agent-2"], "src": "10.77.0.101", "dst": "127.0.0.11"}) in events
+
+
+def test_repo_root_resolution(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from hivemarket.common import paths
+
+    checkout = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(paths, "__file__", str(tmp_path / "site-packages" / "hivemarket" / "common" / "paths.py"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HIVEMARKET_HOME", raising=False)
+    with pytest.raises(RuntimeError, match="HIVEMARKET_HOME"):
+        paths.repo_root()  # installed elsewhere, run from elsewhere: clear error
+    monkeypatch.setenv("HIVEMARKET_HOME", str(checkout))
+    assert paths.repo_root() == checkout
+    monkeypatch.delenv("HIVEMARKET_HOME")
+    monkeypatch.chdir(checkout / "experiments")
+    assert paths.repo_root() == checkout  # found from a subdirectory of the checkout
