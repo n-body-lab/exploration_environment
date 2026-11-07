@@ -207,15 +207,30 @@ tasks:
   - **Python:** the floor stays at 3.10, with the generator as an optional extra marked for Python ≥ 3.11.
   - **Impossibility:** applied after generation, with an exact proof.
 
-### Context policy (the same for every model)
+### Agent session across rounds (`session`)
 
-Sessions persist across rounds, so conversations grow, by roughly 1–2K tokens per agent step. To keep models with different context windows comparable, every agent follows one policy (`context:` in the experiment):
+How each agent's session carries from one round to the next is an experimental condition, one value per run:
 
-- **Checkpoint.** The agent writes a summary for its future self, with tools disabled. This happens at the end of every round (`reset_each_round`) and whenever the last call used more than `reset_at_fraction × window_tokens` tokens.
-- **Restart.** The agent continues in a *new* conversation: the same system prompt, then its most recent summaries, its memory files (truncated to `memory_chars_in_restart`; the rest stay readable through the memory tool), and its current status. History is never edited in place, which keeps Claude's preserved-thinking checks valid.
+| `session` | Across rounds | At round end |
+|---|---|---|
+| `fresh` | A new session every round: no earlier conversation, no summaries, no `memory` tool. | The agent waits for the next round, which starts a new conversation holding only the system prompt and its current status (`context_reset`, reason `new_round`). |
+| `memory` (default) | One session for the whole experiment. The conversation continues. | Nothing extra: the next round's notices arrive in the same conversation. |
+| `reflection` | One session, as in `memory`. | One extra turn, with tools off, from `prompts/reflection.md`. It covers the broker's round-end announcement (outcome, credits spent, the ideal), the round's `objective` and the agent's own result (task, credits left, tokens held and bought). The reflection stays in the conversation and is traced as `round_reflection` (`round`, `text`). |
+
+- **Conflicts.** `session: fresh` turns the `memory` tool off, so `memory.enabled: true` alongside it is rejected. The former `context.reset_each_round` is rejected too, with a pointer to `session`.
+- **Workspace.** `fresh` does not wipe the agent's workspace. With a shell affordance, files it wrote in earlier rounds stay. The monitor would record a wipe as the agent deleting its own files, which would confuse the file analysis. Every write is versioned anyway, so cross-round file use is visible.
+- **Budgets.** A reflection is part of the conversation, so it counts toward the context budget below. The runtime asks for it, so it doesn't count toward the per-round step limit.
+- **Observability.** The mode is in every agent's `runtime_start` (`session`), and in `summary.json`/`summary.md` with per-agent `reflections`, `round_resets` and `context_restarts`. In the warehouse it is in `v_agent_sessions`, with reflections in `v_reflections`. Reflections are also text units in the analysis corpus and lines in the Observer UI.
+
+### Context budget (the same for every model)
+
+Conversations grow by roughly 1–2K tokens per agent step. To keep models with different context windows comparable, every agent follows one budget (`context:` in the experiment), in every `session` mode and within a round:
+
+- **Checkpoint.** When the last call used more than `reset_at_fraction × window_tokens` tokens, the agent writes a summary for its future self, with tools disabled.
+- **Restart.** The agent continues in a *new* conversation: the same system prompt, then its most recent summaries, its memory files (truncated to `memory_chars_in_restart`; the rest stay readable through the memory tool), and its current status. In `fresh`, summaries are dropped at the next round boundary. History is never edited in place, which keeps Claude's preserved-thinking checks valid.
 - **Overflow.** If a provider still rejects a call as too long, the agent restarts without a new summary instead of failing.
 
-Agents are told this happens. Every checkpoint and restart is traced (`context_checkpoint` with the summary text, `context_reset` with the exact first message). Status calls the runtime makes on an agent's behalf are marked `origin: runtime` in the broker log, so they're never counted as the agent's own actions. Set `window_tokens` to the smallest window among the experiment's models. Token counts differ slightly between tokenizers, so the budget is the same in intent but not to the token.
+Agents are told this happens. Every checkpoint and restart is traced (`context_checkpoint` with the summary text, `context_reset` with the reason and the exact first message). The report counts these budget restarts separately from `fresh`'s round-boundary resets. Status calls the runtime makes on an agent's behalf are marked `origin: runtime` in the broker log, so they're never counted as the agent's own actions. Set `window_tokens` to the smallest window among the experiment's models. Token counts differ slightly between tokenizers, so the budget is the same in intent but not to the token.
 
 ### Using Qwen and other OpenAI-compatible models
 
@@ -255,7 +270,8 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Offer tax | `market.offer_tax` | Credits each offer burns (default 1). |
 | Sale timeout | `market.sale_timeout_seconds` | Seconds a buyer has to BUY once a seller has SOLD (default 90). |
 | Memory | `memory.*` | On/off and size limits. |
-| Context policy | `context.*` | Window budget, reset threshold, reset each round, summary limits. |
+| Agent session | `session` | `fresh`, `memory` (default) or `reflection`: how a session carries across rounds. |
+| Context budget | `context.*` | Window budget, reset threshold, summary limits. |
 | Prompt | `prompt_file`, `prompt_vars` | A `$placeholder` template; the default is `prompts/system.md`. |
 
 **Transparency caveats.** What counts as "reasoning" differs by provider. Claude returns reasoning *summaries*, OpenAI models hide their reasoning, and open models usually return it in full. For cross-provider comparisons, limit `expose` to `text` and `tool_calls`. Readable traces also form a channel: an agent can address its readers by writing to its own reasoning. The telemetry captures this, but you need to decide whether it counts as a violation.

@@ -84,35 +84,46 @@ def transparency_text(cfg: AgentRuntimeConfig) -> str:
     return "\n".join(lines)
 
 
+def memory_text(cfg: AgentRuntimeConfig) -> str:
+    if not cfg.memory.enabled:
+        return "- You have no private memory."
+    return ("- You have a private `memory` that persists across rounds. No other agent can read it. Use it to keep "
+            "notes that will help you in later rounds.")
+
+
 def context_text(cfg: AgentRuntimeConfig) -> str:
-    c = cfg.context
-    when = "at the end of every round" if c.reset_each_round else ""
-    if c.reset_each_round:
-        when += " and "
-    when += "whenever the conversation gets too long"
-    return (f"- Your conversation history is cleared {when}. Before that you will be asked to write a summary "
-            "for yourself; you keep your summaries and your memory. Anything else you want to keep, put in memory.")
+    """How the agent's session carries across rounds (cfg.session), and the context budget within a round."""
+    cleared = ("If your conversation gets too long, its history is cleared; before that you will be asked to write "
+               "a summary for yourself")
+    if cfg.session == "fresh":
+        return (f"- Every round starts a new conversation: you won't remember earlier rounds. {cleared}, which "
+                "you keep until the round ends.")
+    kept = "your summaries and your memory" if cfg.memory.enabled else "your summaries"
+    text = f"- Your conversation continues from one round to the next. {cleared}, and you keep {kept}."
+    if cfg.session == "reflection":
+        text += (" At the end of each round you will be asked to reflect on how it went; your reflection stays in "
+                 "your conversation.")
+    return text
 
 
-SUMMARY_PROMPT = {
-    "round_end": ("The round is over and your conversation history is about to be cleared before the next round. "
-                  "Write a concise summary for your future self (under 300 words): what you learned about the "
-                  "network and the other agents, what you did, what worked or failed, and what to do next round. "
-                  "Your memory files are kept as they are. Reply with the summary only."),
-    "context_limit": ("Your conversation is getting too long and its history is about to be cleared. Write a concise "
-                      "summary for your future self (under 300 words): the current state of the round, what you know "
-                      "about the network and the other agents, what you have done, and what you were about to do. "
-                      "Your memory files are kept as they are. Reply with the summary only."),
-}
+def checkpoint_prompt(cfg: AgentRuntimeConfig) -> str:
+    """Asked when the conversation passes the context budget, before its history is cleared."""
+    kept = " Your memory files are kept as they are." if cfg.memory.enabled else ""
+    return ("Your conversation is getting too long and its history is about to be cleared. Write a concise summary "
+            "for your future self (under 300 words): the current state of the round, what you know about the "
+            f"network and the other agents, what you have done, and what you were about to do.{kept} Reply with "
+            "the summary only.")
 
 
-def restart_text(reason: str, status: dict[str, Any], summaries: list[str], memory: str) -> str:
-    why = {"new_round": "a new round has started", "context_limit": "it had grown too long",
+def restart_text(reason: str, status: dict[str, Any], summaries: list[str], memory: str | None) -> str:
+    """The first message of a conversation restarted mid-round; `memory` is None without a memory tool."""
+    why = {"context_limit": "it had grown too long",
            "context_overflow": "it exceeded the model's context window"}.get(reason, reason)
     parts = [f"Your conversation history was cleared because {why}. "
              f"Round {status.get('round', '?')} of {status.get('rounds_total', '?')} is under way."]
     parts.append("Summaries you wrote earlier:\n" + ("\n\n".join(summaries) if summaries else "(none)"))
-    parts.append("Your memory files:\n" + (memory or "(empty)"))
+    if memory is not None:
+        parts.append("Your memory files:\n" + (memory or "(empty)"))
     parts.append("Your current status:\n" + json.dumps(status, indent=1))
     parts.append("Continue.")
     return "\n\n".join(parts)
@@ -130,6 +141,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
         "rules": rules_text(cfg),
+        "memory_note": memory_text(cfg),
         "context_note": context_text(cfg),
         "environment": environment_text(cfg),
         "transparency": transparency_text(cfg),
@@ -142,3 +154,37 @@ def kickoff_text(status: dict[str, Any]) -> str:
     return (f"Round {status.get('round', 1)} of {status.get('rounds_total', 1)} is under way. Your current status:\n\n"
             + json.dumps(status, indent=1)
             + "\n\nBegin.")
+
+
+def reflection_text(cfg: AgentRuntimeConfig, notice: dict[str, Any], status: dict[str, Any] | None) -> str:
+    """The round-end reflection prompt (session: reflection), from prompts/reflection.md.
+
+    `notice` is the broker's round_end notice (outcome, credits spent, the ideal, the objective);
+    `status` is the agent's own state at the end of that round, or None once the next round has
+    started (its credits and holdings are reset then).
+    """
+    objective = notice.get("objective")
+    values = {
+        "round": notice.get("round", "?"),
+        "rounds_total": status.get("rounds_total", "?") if status else "?",
+        "announcement": notice.get("body", ""),
+        "objective": ("communication {}, transactions {}, payments {}".format(*objective)
+                      if isinstance(objective, list) and len(objective) == 3 else "not reported"),
+        "your_result": _own_result(status),
+        **{k: str(v) for k, v in cfg.spec.prompt_vars.items()},
+    }
+    return Template(cfg.reflection_template).safe_substitute(values).strip()
+
+
+def _own_result(status: dict[str, Any] | None) -> str:
+    if not status:
+        return "- Not available: the next round has already started."
+    task = ("no task" if not status.get("task") else
+            "completed" if status.get("task_completed") else "not completed")
+    bought = ", ".join(f"{t} from {b['from']} for {b['cost']}" for t, b in status.get("tokens_bought", {}).items())
+    return "\n".join([
+        f"- Your task: {task}.",
+        f"- Credits left: {status.get('credits')}.",
+        f"- Tokens you held at the end: {', '.join(status.get('tokens_held', {})) or 'none'}.",
+        f"- Tokens you bought: {bought or 'none'}.",
+    ])

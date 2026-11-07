@@ -1,13 +1,25 @@
 """Agent runtime: the LLM <-> tools loop for one agent.
 
+How the session carries across rounds is the experiment's `session` (cfg.session):
+  fresh       at each round end, wait for the next round and start a new conversation holding only
+              the system prompt and the current status (no summaries, no memory tool)
+  memory      nothing at round end: the next round's notices arrive in the same conversation
+  reflection  as memory, plus one reflection turn (tools off) when the round ends; it stays in
+              the conversation
+Within a round, every mode restarts the conversation when it passes the context budget (after a
+summary) or when the provider reports overflow.
+
 Traced events (sent to the collector):
-  runtime_start     system prompt, tool list, spec, affordance
-  llm_turn          text, reasoning summaries, tool calls, usage, serving model, latency
-  llm_error         provider/API failures
-  tool_call         name, args, output, error flag, duration
-  events_delivered  market messages/notices and direct connections shown to the model
-  direct_inbound    (from inbox.py) every connection to the agent's direct port
-  runtime_stop      reason and step count
+  runtime_start       system prompt, tool list, spec, affordance, session
+  llm_turn            text, reasoning summaries, tool calls, usage, serving model, latency
+  llm_error           provider/API failures
+  tool_call           name, args, output, error flag, duration
+  events_delivered    market messages/notices and direct connections shown to the model
+  direct_inbound      (from inbox.py) every connection to the agent's direct port
+  round_reflection    round, text, usage (session: reflection)
+  context_checkpoint  summary written before a budget restart
+  context_reset       a new conversation: reason new_round (fresh) | context_limit | context_overflow
+  runtime_stop        reason and step count
 """
 
 from __future__ import annotations
@@ -19,7 +31,8 @@ from typing import Any
 
 from hivemarket.agent.inbox import DirectInbox, DirectMessage
 from hivemarket.agent.market_client import MarketClient
-from hivemarket.agent.prompts import SUMMARY_PROMPT, kickoff_text, render_system_prompt, restart_text
+from hivemarket.agent.prompts import (checkpoint_prompt, kickoff_text, reflection_text, render_system_prompt,
+                                     restart_text)
 from hivemarket.agent.providers import make_provider
 from hivemarket.agent.providers.base import ToolResult, context_tokens
 from hivemarket.agent.telemetry import Telemetry
@@ -49,7 +62,9 @@ class AgentRuntime:
         self.market_closed = False
         self.round_deadline: float | None = None
         self.summaries: list[str] = []  # written by the agent at each checkpoint
-        self.pending_checkpoint: str | None = None  # reason, set by round_end or the context budget
+        self.pending_checkpoint: str | None = None  # set when the context budget is passed
+        self.round_over: dict[str, Any] | None = None  # a round_end notice awaiting the session's round-end step
+        self.budget = int(cfg.context.window_tokens * cfg.context.reset_at_fraction)
         self.restarts = 0
 
     # ------------------------------------------------------------- events
@@ -94,8 +109,8 @@ class AgentRuntime:
                         self.steps_in_round = 0
                     elif e.get("event") == "round_end":
                         self.last_round_ended = max(self.last_round_ended, e.get("round", self.round_no))
-                        if self.cfg.context.reset_each_round:
-                            self.pending_checkpoint = "round_end"
+                        if self.cfg.session != "memory":
+                            self.round_over = e
                 if market_events:
                     self.cursor = max(e["seq"] for e in market_events)
                 if not body.get("market_open", True):
@@ -145,7 +160,7 @@ class AgentRuntime:
             self.provider.start(system, tools, kickoff_text(status))
             self.telemetry.emit("runtime_start", system_prompt=system, tools=[t.name for t in tools],
                                 spec=self.cfg.spec.model_dump(), affordance=self.cfg.affordance.model_dump(),
-                                peers_disclosed=self.cfg.peers, initial_status=status)
+                                peers_disclosed=self.cfg.peers, initial_status=status, session=self.cfg.session)
             reason = await self._loop()
         except Exception as e:
             self.telemetry.emit("runtime_crash", error=repr(e))
@@ -162,7 +177,7 @@ class AgentRuntime:
         """Ask the agent for a summary for its future self (tools disabled)."""
         text, error = "", None
         try:
-            turn = await self.provider.summarize(SUMMARY_PROMPT[reason])
+            turn = await self.provider.summarize(checkpoint_prompt(self.cfg))
             self.steps += 1
             text = (turn.text or "").strip()[: self.cfg.context.summary_chars]
             usage = turn.usage
@@ -173,18 +188,56 @@ class AgentRuntime:
         self.telemetry.emit("context_checkpoint", round=self.round_no, reason=reason, summary=text,
                             usage=usage, error=error)
 
-    async def _restart(self, reason: str) -> None:
-        """Continue in a fresh conversation: summaries + memory + current status."""
+    async def _status(self) -> dict[str, Any]:
         try:
             _, status = await self.market.status(origin="runtime")
         except Exception:
             status = {}
-        memory = self.tools.memory.dump(self.cfg.context.memory_chars_in_restart) if self.cfg.memory.enabled else ""
-        first = restart_text(reason, status, self.summaries[-self.cfg.context.max_summaries:], memory)
+        return status
+
+    async def _restart(self, reason: str) -> None:
+        """Continue in a fresh conversation mid-round: summaries + memory + current status."""
+        status = await self._status()
+        memory = self.tools.memory.dump(self.cfg.context.memory_chars_in_restart) if self.cfg.memory.enabled else None
+        self._reset(reason, restart_text(reason, status, self.summaries[-self.cfg.context.max_summaries:], memory))
+
+    def _reset(self, reason: str, first: str) -> None:
         self.provider.reset(first)
         self.restarts += 1
         self.telemetry.emit("context_reset", round=self.round_no, reason=reason, restart_number=self.restarts,
                             first_message=first, summaries=len(self.summaries))
+
+    # ----------------------------------------------------------- round end
+
+    async def _end_of_round(self, notice: dict[str, Any]) -> None:
+        """The session's step when the broker announces a round is over (never called in `memory`)."""
+        if self.cfg.session == "reflection":
+            await self._reflect(notice)
+            return
+        # fresh: the next round starts a new conversation with nothing carried over
+        await self._await_round_start()
+        if not self.market_closed:
+            self.summaries.clear()
+            self._reset("new_round", kickoff_text(await self._status()))
+
+    async def _reflect(self, notice: dict[str, Any]) -> None:
+        """One turn (tools off) reflecting on the round; it stays in the conversation for the next round.
+
+        Not counted against the per-round step limit (the runtime asks for it), but it is part of
+        the conversation, so it counts toward the context budget.
+        """
+        status = await self._status()
+        own = status if status.get("round") == notice.get("round") else None  # reset once the next round starts
+        text, usage, error = "", None, None
+        try:
+            turn = await self.provider.summarize(reflection_text(self.cfg, notice, own))
+            self.steps += 1
+            text, usage = (turn.text or "").strip(), turn.usage
+        except Exception as e:
+            error = repr(e)
+        self.telemetry.emit("round_reflection", round=notice.get("round"), text=text, usage=usage, error=error)
+        if context_tokens(usage) > self.budget and not self.pending_checkpoint:
+            self.pending_checkpoint = "context_limit"
 
     async def _await_round_start(self) -> str | None:
         """Wait until a round after the last ended one is under way.
@@ -198,8 +251,8 @@ class AgentRuntime:
             note = await self._collect_events(wait=30)
             if note:
                 notes.append(note)
-        # A round that ended while we were waiting was never played: nothing to summarize.
-        self.pending_checkpoint = None
+        # A round that ended while we were waiting was never played: nothing to do for it.
+        self.round_over = None
         return "\n".join(notes) or None
 
     async def _wait_for_next_round(self) -> str | None:
@@ -213,20 +266,17 @@ class AgentRuntime:
     async def _loop(self) -> str:
         errors = 0
         limit = self.cfg.max_steps_per_round or self.cfg.spec.max_steps
-        budget = int(self.cfg.context.window_tokens * self.cfg.context.reset_at_fraction)
         while True:
+            if self.round_over:  # before the market check: the last round is reflected on too
+                notice, self.round_over = self.round_over, None
+                await self._end_of_round(notice)
+                continue
             if self.market_closed:
                 return "market_closed"
             if self.pending_checkpoint:
                 reason, self.pending_checkpoint = self.pending_checkpoint, None
                 await self._checkpoint(reason)
-                if reason == "round_end":
-                    await self._await_round_start()  # the new round's notice arrives with fresh contents
-                    if self.market_closed:
-                        return "market_closed"
-                    await self._restart("new_round")
-                else:
-                    await self._restart(reason)
+                await self._restart(reason)
                 continue
             if self.steps_in_round >= limit:
                 self.telemetry.emit("round_step_limit", round=self.round_no, steps=self.steps_in_round, limit=limit)
@@ -262,7 +312,7 @@ class AgentRuntime:
             )
             if turn.refused:
                 return "refusal"
-            if context_tokens(turn.usage) > budget and not self.pending_checkpoint:
+            if context_tokens(turn.usage) > self.budget and not self.pending_checkpoint:
                 self.pending_checkpoint = "context_limit"
             if not turn.tool_calls and "<tool_call>" in (turn.text or ""):
                 # Typical of OpenAI-compatible servers without a tool-call parser (e.g. vLLM without

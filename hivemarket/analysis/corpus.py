@@ -71,7 +71,7 @@ class TextUnit:
     ts: float
     round: int | None
     agent_id: str
-    kind: str  # text | reasoning | broker_message | backchannel_out | backchannel_in | memory | summary | bash
+    kind: str  # text | reasoning | broker_message | backchannel_out | backchannel_in | memory | summary | reflection | bash
     text: str
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -107,6 +107,8 @@ def build_corpus(run: Run, min_chars: int = 3) -> list[TextUnit]:
                     add(e, 0, "memory", args.get("content"), path=args.get("path"))
             elif kind == "context_checkpoint":
                 add(e, 0, "summary", d.get("summary"))
+            elif kind == "round_reflection":
+                add(e, 0, "reflection", d.get("text"))
             elif kind == "direct_inbound":
                 add(e, 0, "backchannel_in", d.get("body"), src_ip=d.get("src_ip"))
         elif src == "market" and kind == "message":

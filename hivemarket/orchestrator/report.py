@@ -62,6 +62,8 @@ def analyze(run_dir: Path) -> dict[str, Any]:
             "offers_made": 0, "offers_received": 0, "offers_withdrawn": 0, "sales_started": 0,
             "demand_relays": 0,
             "relayed": 0, "stuck_declarations": 0, "memory_writes": 0, "rounds_completed": 0,
+            # conversation restarts on the context budget (not round boundaries), fresh-session round resets
+            "context_restarts": 0, "round_resets": 0, "reflections": 0,
             "buy_failures": Counter(), "submissions": 0, "stop_reason": None,
             "first_buy_failure_ts": None, "served_models": Counter(),
             "trace_reads": Counter(), "trace_lists": 0, "files_written": 0, "files_deleted": 0,
@@ -71,6 +73,7 @@ def analyze(run_dir: Path) -> dict[str, Any]:
     needs = {n: set(spec.get("needs", [])) for n, spec in (world.get("nodes") or {}).items()}
     asked_for: dict[str, set[str]] = defaultdict(set)  # tokens each agent has received offers for
     indicators: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    sessions: set[str] = set()  # the experiment's session mode, as each agent's runtime reported it
     gateway_usage_seen: set[str] = set()
 
     def flag(agent: str | None, ts: float, level: str, kind: str, detail: str) -> None:
@@ -187,6 +190,12 @@ def analyze(run_dir: Path) -> dict[str, Any]:
                 flag(a, ts, "contact", "direct_inbound", f"from {sender}: {d.get('body', '')}")
             elif kind == "runtime_stop":
                 st["stop_reason"] = d.get("reason")
+            elif kind == "runtime_start" and d.get("session"):
+                sessions.add(d["session"])
+            elif kind == "context_reset":
+                st["round_resets" if d.get("reason") == "new_round" else "context_restarts"] += 1
+            elif kind == "round_reflection":
+                st["reflections"] += 1
 
         elif src == "monitor" and st:
             if kind == "file_write":
@@ -229,6 +238,8 @@ def analyze(run_dir: Path) -> dict[str, Any]:
             "messages_sent": st["messages_sent"], "message_credits": st["message_credits"],
             "relayed": st["relayed"], "stuck_declarations": st["stuck_declarations"],
             "memory_writes": st["memory_writes"],
+            "context_restarts": st["context_restarts"], "round_resets": st["round_resets"],
+            "reflections": st["reflections"],
             "submissions": st["submissions"],
             "buy_failures": dict(st["buy_failures"]),
             "offers_made": st["offers_made"],
@@ -260,6 +271,7 @@ def analyze(run_dir: Path) -> dict[str, Any]:
             "ideal": {k: ideal.get(k) for k in IDEAL_KEYS}
                      | {"graph_ideal_credits": ideal.get("graph_ideal", {}).get("ideal_credits")},
             "market": {k: generated.get(k) for k in MARKET_KEYS} if generated else None,
+            "session": sessions.pop() if len(sessions) == 1 else (sorted(sessions) or None),
             "rounds": rounds, "agents": agents_out}
 
 
@@ -300,6 +312,14 @@ def _ideal_line(ideal: dict[str, Any]) -> str:
             f"{graph}\n")
 
 
+def _session_line(summary: dict[str, Any]) -> str:
+    agents = summary["agents"].values()
+    counts = [f"{sum(a[k] for a in agents)} {label}" for k, label in
+              (("reflections", "round reflections"), ("round_resets", "round-boundary resets"),
+               ("context_restarts", "restarts on the context budget"))]
+    return f"Agent session across rounds: `{summary['session']}` ({', '.join(counts)})."
+
+
 def _difficulty_section(market: dict[str, Any]) -> list[str]:
     src = market["source"]
     origin = (f"preset `{src['preset']}`" if src.get("preset") else f"family `{src['family']}`" if src.get("family")
@@ -335,6 +355,8 @@ def write_report(run_dir: Path) -> Path:
     lines = [f"# Run {summary['run_id']}", "",
              f"Experiment `{summary['experiment']}`, mode `{summary['mode']}`, {summary['event_count']} events.", ""]
     lines.append(_ideal_line(summary["ideal"]))
+    if summary["session"]:
+        lines.append(_session_line(summary) + "\n")
     if summary["market"]:
         lines += _difficulty_section(summary["market"])
     lines += ["## Rounds", "", "| round | outcome | reason | credits spent | tokens | messages | fees | ideal | excess | "

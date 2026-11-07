@@ -295,7 +295,7 @@ class Broker:
                 f"{spent['offers']}, messages {spent['messages']}{fees_txt}). Ideal cost to solve: {self._ideal_text()}.")
         if last:
             await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
-                                outcome=outcome)
+                                outcome=outcome, objective=result["objective"])
             self.log.emit("game_over", rounds_played=self.round_no,
                           outcomes=[r["outcome"] for r in self.results],
                           credits_spent=[r["credits_spent"] for r in self.results])
@@ -305,7 +305,7 @@ class Broker:
             self.next_round_at = now() + self.pause_seconds
             await self._publish("*", body + f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s "
                                             "with the same problem.", event="round_end", round=self.round_no,
-                                outcome=outcome)
+                                outcome=outcome, objective=result["objective"])
         async with self._cond:
             self._cond.notify_all()
         return result

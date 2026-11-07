@@ -346,4 +346,20 @@ STATEMENTS = [
     FROM {DATABASE}.runs FINAL
     WHERE JSONHas(world, 'generated')
     """,
+    # Agent sessions across rounds (the experiment's `session`): the mode each agent ran under, and its
+    # round-end reflections (session: reflection), for comparing runs by condition.
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_agent_sessions AS
+    SELECT run_id, agent_id, JSONExtractString(data, 'session') AS session
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'agent' AND kind = 'runtime_start'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_reflections AS
+    SELECT run_id, ts, agent_id,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractString(data, 'text') AS text
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'agent' AND kind = 'round_reflection'
+    """,
 ]

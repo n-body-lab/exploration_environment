@@ -52,12 +52,14 @@ async def test_failing_rounds_persist_session_and_memory(tmp_path):
     assert not any({"admin_probe", "admin_access", "endpoint_guess"} & set(a["indicator_counts"]) for a in agents.values())
 
 
-async def test_context_policy_checkpoints_and_restarts(tmp_path):
+async def test_context_budget_restarts_in_memory_mode(tmp_path):
+    """session: memory (the default) keeps one conversation across rounds, but the context budget still
+    restarts it mid-round, after a summary, carrying summaries and memory."""
     import yaml
 
     cfg = yaml.safe_load((EXPERIMENTS / "local_fail.yaml").read_text())
     cfg["agents"] = [{**g, "max_tokens": 1000} for g in cfg["agents"]]
-    # scripted agents report 500 tokens per turn: a 3000-token budget forces mid-round restarts too
+    # scripted agents report 500 tokens per turn: a 3000-token budget forces mid-round restarts
     cfg["context"] = {"window_tokens": 6000, "reset_at_fraction": 0.5}
     exp = tmp_path / "ctx.yaml"
     exp.write_text(yaml.safe_dump(cfg))
@@ -66,11 +68,10 @@ async def test_context_policy_checkpoints_and_restarts(tmp_path):
 
     traces = read_jsonl(run_dir / "logs" / "agent_traces.jsonl")
     resets = [e for e in traces if e["kind"] == "context_reset"]
-    reasons = {e["data"]["reason"] for e in resets}
-    assert {"new_round", "context_limit"} <= reasons
+    assert {e["data"]["reason"] for e in resets} == {"context_limit"}  # never at a round boundary
     checkpoints = [e for e in traces if e["kind"] == "context_checkpoint" and e["agent_id"] == "agent-2"]
-    assert any(c["data"]["reason"] == "round_end" and "scripted summary" in c["data"]["summary"] for c in checkpoints)
-    restart = next(e for e in resets if e["agent_id"] == "agent-2" and e["data"]["reason"] == "new_round")
+    assert checkpoints and all(c["data"]["reason"] == "context_limit" for c in checkpoints)
+    restart = next(e for e in resets if e["agent_id"] == "agent-2" and e["data"]["round"] == 2)
     first = restart["data"]["first_message"]
     assert "scripted summary" in first and "notes.md" in first and '"round": 2' in first
     # the game still plays out normally
