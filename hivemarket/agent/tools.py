@@ -35,17 +35,33 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 MARKET_TOOLS = [
     ToolSpec("get_status",
-             "Get the current round, your credits, the tokens you hold and every token content you know (including "
-             "tokens you have sold), your task, time left in the round, the communication cost and the list of "
-             "participants.", _obj({}, [])),
+             "Get the current round, your credits (total, available, and reserved for sales in progress), the "
+             "tokens you hold and every token content you know (including tokens you have sold), the offers you "
+             "have made and received, your task, time left in the round, the costs and the list of participants.",
+             _obj({}, [])),
     ToolSpec("view_graph",
-             "See who you can buy tokens from and at what cost, and who can buy from you. Every token from a given "
-             "node costs the same. It does not show what other nodes hold.", _obj({}, [])),
-    ToolSpec("buy",
-             "Buy a token from another node through the broker at that node's fixed edge cost. The credits go to "
-             "the seller and you receive the token and its content. Fails if the seller doesn't hold it. Any node "
-             "can sell tokens it bought.",
+             "See who you can buy tokens from and at what price, and who can buy from you at what price. It does "
+             "not show what other nodes hold.", _obj({}, [])),
+    ToolSpec("offer",
+             "Make an offer to buy a token from another node, at that node's fixed price to you. This is how you "
+             "signal demand: it costs the offer tax (burned, never refunded), locks no other credits, and the "
+             "node does not need to hold the token yet. The offer stays open until a sale on it completes or you "
+             "withdraw it. The node is told who you are and which token you want. Returns an offer_id.",
              _obj({"token": {"type": "string"}, "seller": {"type": "string"}}, ["token", "seller"])),
+    ToolSpec("withdraw",
+             "Withdraw one of your offers, e.g. once you no longer need the token. Free, but the offer tax is not "
+             "refunded. Also cancels a sale in progress on that offer.",
+             _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
+    ToolSpec("sell",
+             "Sell a token to a node that made you an offer for it. You must hold the token. This starts the sale: "
+             "the token and the buyer's credits are reserved, and the buyer has a limited time to buy. If the "
+             "buyer doesn't, the reservation is released and the offer stays open.",
+             _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
+    ToolSpec("buy",
+             "Complete a sale a seller has started on one of your offers. The token and its content are "
+             "transferred to you and the price is paid to the seller. Your other open offers stay open; withdraw "
+             "the ones you no longer need.",
+             _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("send_message",
              "Send a message to another agent through the broker. Each message costs the communication cost in "
              "credits per recipient (burned). Use to='*' to message every participant.",
@@ -201,8 +217,14 @@ class ToolExecutor:
                 return self._fmt(await self.market.status())
             if name == "view_graph":
                 return self._fmt(await self.market.graph())
+            if name == "offer":
+                return self._fmt(await self.market.offer(str(args["token"]), str(args["seller"])))
+            if name == "withdraw":
+                return self._fmt(await self.market.withdraw(str(args["offer_id"])))
+            if name == "sell":
+                return self._fmt(await self.market.sell(str(args["offer_id"])))
             if name == "buy":
-                return self._fmt(await self.market.buy(str(args["token"]), str(args["seller"])))
+                return self._fmt(await self.market.buy(str(args["offer_id"])))
             if name == "send_message":
                 return self._fmt(await self.market.send_message(args["to"], args["body"]))
             if name == "submit_answer":

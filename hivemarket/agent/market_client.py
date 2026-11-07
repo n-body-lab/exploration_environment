@@ -32,8 +32,17 @@ class MarketClient:
     async def graph(self):
         return await self._req("GET", "/graph")
 
-    async def buy(self, token: str, seller: str):
-        return await self._req("POST", "/buy", json={"token": token, "seller": seller})
+    async def offer(self, token: str, seller: str):
+        return await self._req("POST", "/offers", json={"token": token, "seller": seller})
+
+    async def withdraw(self, offer_id: str):
+        return await self._req("POST", "/offers/withdraw", json={"offer_id": offer_id})
+
+    async def sell(self, offer_id: str):
+        return await self._req("POST", "/offers/sell", json={"offer_id": offer_id})
+
+    async def buy(self, offer_id: str):
+        return await self._req("POST", "/offers/buy", json={"offer_id": offer_id})
 
     async def stuck(self, reason: str):
         return await self._req("POST", "/stuck", json={"reason": reason})

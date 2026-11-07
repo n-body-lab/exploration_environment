@@ -3,12 +3,14 @@
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
            Market events of note: round_start, balances (every agent's credits after each change),
-           graph_state (full market state after each change), exchange, message, buy_failed, submission,
+           graph_state (full market state after each change), offer_made / offer_withdrawn /
+           sale_started / sale_completed / sale_lapsed / sale_unaffordable / offer_cleared,
+           offer_failed, exchange, message, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
 analysis   outputs of `hivemarket analyze` (backchannel, signal, exploration_action, exploration_summary,
-           former_holder_buy);
+           former_holder);
            replaced wholesale whenever a run is re-analysed.
 embeddings one vector per agent text unit; search with cosineDistance(vector, ...).
 v_*        convenience views; summary.md from `hivemarket report` remains the reference analysis.
@@ -100,6 +102,7 @@ STATEMENTS = [
     WHERE source = 'gateway' AND kind = 'llm_call'
     """,
     f"DROP VIEW IF EXISTS {DATABASE}.v_trades",
+    f"DROP VIEW IF EXISTS {DATABASE}.v_orders",  # replaced by v_offers
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_exchanges AS
     SELECT run_id, ts,
@@ -108,9 +111,34 @@ STATEMENTS = [
            JSONExtractString(data, 'seller') AS seller,
            JSONExtractString(data, 'token') AS token,
            JSONExtractInt(data, 'cost') AS cost,
-           JSONExtractBool(data, 'relay') AS relay
+           JSONExtractBool(data, 'relay') AS relay,
+           JSONExtractString(data, 'offer_id') AS offer_id
     FROM {DATABASE}.events FINAL
     WHERE source = 'market' AND kind = 'exchange'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_offers AS
+    SELECT run_id,
+           JSONExtractString(data, 'offer_id') AS offer_id,
+           any(JSONExtractUInt(data, 'round')) AS round,
+           any(JSONExtractString(data, 'buyer')) AS buyer,
+           any(JSONExtractString(data, 'seller')) AS seller,
+           any(JSONExtractString(data, 'token')) AS token,
+           anyIf(JSONExtractInt(data, 'price'), kind = 'offer_made') AS price,
+           multiIf(countIf(kind = 'sale_completed') > 0, 'executed', countIf(kind = 'offer_withdrawn') > 0, 'withdrawn',
+                   countIf(kind = 'offer_cleared') > 0, 'cleared', 'open') AS final_status,
+           countIf(kind = 'sale_started') AS sales_started,
+           countIf(kind = 'sale_lapsed') AS sales_lapsed,
+           countIf(kind = 'sale_unaffordable') AS sales_unaffordable,
+           minIf(ts, kind = 'offer_made') AS made_at,
+           minIf(ts, kind = 'sale_started') AS first_sale_at,
+           maxIf(ts, kind = 'sale_completed') AS completed_at,
+           anyIf(JSONExtractBool(data, 'seller_holds'), kind = 'offer_made') AS seller_held_token,
+           anyIf(JSONExtractBool(data, 'seller_previously_held'), kind = 'offer_made') AS seller_previously_held
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind IN ('offer_made', 'offer_withdrawn', 'offer_cleared', 'sale_started',
+                                         'sale_completed', 'sale_lapsed', 'sale_unaffordable')
+    GROUP BY run_id, offer_id
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_messages AS

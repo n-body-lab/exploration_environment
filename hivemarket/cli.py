@@ -9,6 +9,7 @@
   hivemarket calibrate-signals                 score the embedding tier on the labelled calibration set
   hivemarket ingest runs/<run_id> [--full]     (re)ship a run to the observatory
   hivemarket backup --to /path                 ClickHouse backup + mirror of object storage
+  hivemarket ui [--runs-dir runs] [--port 8090]  live view / replay of runs in the browser
 """
 
 from __future__ import annotations
@@ -77,7 +78,16 @@ def main() -> None:
     op.add_argument("action", choices=["up", "down", "status"])
     bp = sub.add_parser("backup")
     bp.add_argument("--to", required=True, type=Path, help="destination directory (external drive, NAS, ...)")
+    up = sub.add_parser("ui", help="observer UI: live view and replay of runs")
+    up.add_argument("--runs-dir", default="runs")
+    up.add_argument("--host", default="127.0.0.1", help="it shows everything, incl. private memory: keep it local")
+    up.add_argument("--port", type=int, default=8090)
     args = p.parse_args()
+
+    if args.cmd == "ui":
+        from hivemarket.ui.server import main as serve_ui
+        serve_ui(args.runs_dir, args.host, args.port)
+        return
 
     if args.cmd == "observatory":
         from hivemarket.observatory import manage
