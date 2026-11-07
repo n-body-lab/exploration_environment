@@ -81,6 +81,9 @@ svg text { fill: var(--ink); font-family: system-ui, sans-serif; }
 .g-chip-text.need.known { fill: #fff; }
 .g-flying { fill: var(--move); stroke: #fff; stroke-width: 1; }
 .g-round { font-size: 13px; fill: var(--muted); }
+.g-market { fill: var(--node); stroke: var(--order); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.g-market.flash { stroke-width: 3; stroke-dasharray: none; }
+.g-take { font-size: 13px; font-family: var(--mono); }
 
 #alerts { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; min-height: 0; position: relative; overflow-anchor: none; }
 #alerts li { border-bottom: 1px solid var(--line); padding: 6px 12px; cursor: pointer; }

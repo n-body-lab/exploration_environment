@@ -119,6 +119,17 @@ async def test_page_draws_a_finished_run(run_dir):
                 assert expected in texts, (agent, expected, texts)
             assert final["agent-1"] > start["agent-1"] and final["agent-2"] < start["agent-2"]  # a sale happened
 
+            # The market's take: the last round's burned credits, and the whole run's (the round total
+            # reset when round 2 started, so it is less than the run total).
+            ends = [json.loads(line)["data"] for line in (run_dir / "logs" / "market.jsonl").read_text().splitlines()
+                    if '"round_end"' in line]
+            burned = [e["credits_check"]["burned"] for e in ends]
+            assert len(burned) >= 2 and burned[0] > 0
+            box = await page.js("[...document.querySelectorAll('#market-take text')].map(t => t.textContent)")
+            assert box and box[0].startswith("Market's take"), box
+            assert f"this round {burned[-1]} cr" in box, box
+            assert any(t.startswith(f"this run {sum(burned)} cr") for t in box), box
+
             # The event stream fills its own box; the page itself doesn't scroll or grow while it redraws.
             assert await page.js("document.querySelectorAll('#log tr[data-id]').length") > 20
             before = await page.js("[scrollY, document.documentElement.scrollHeight]")
