@@ -190,3 +190,56 @@ async def test_copy_mode_keeps_seller_copy(tmp_path):
     assert "A1" in b.holds["a"] and "A1" in b.holds["b"] and "A1" in b.holds["c"]
     assert not b.exchanges[0]["moved"] and b.status("a")["token_transfer"] == "copy"
     assert not any("no longer hold" in m["body"] for m in b.inbox("a"))
+
+
+async def test_graph_state_logged_after_every_change(tmp_path):
+    b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await b.buy("b", "A1", "a")
+    await b.send_message("c", "b", "please pass A1 on")
+    await b.submit("b", answer(b, "b"))
+    await b.declare_stuck("c", "giving up")
+    events = read_jsonl(tmp_path / "m.jsonl")
+    rows = [e for e in events if e["kind"] == "graph_state"]
+    assert [r["data"]["cause"] for r in rows] == ["round_start", "exchange", "message", "submission", "stuck", "round_end"]
+    assert [r["data"]["state_seq"] for r in rows] == [1, 2, 3, 4, 5, 6]  # causal order, even on equal ts
+    assert all(r["ts"] and r["ts_iso"] for r in rows)
+
+    start, ex = rows[0]["data"], rows[1]["data"]
+    assert start["holdings"] == {"a": ["A1", "A2"], "b": ["B1"], "c": []}
+    assert start["owners"]["A1"] == ["a"] and start["total_credits"] == 260
+    assert ex["owners"]["A1"] == ["b"] and ex["holdings"]["a"] == ["A2"]  # moved, not copied
+    assert ex["known"]["a"] == ["A1", "A2"] and ex["credits"] == {"a": 110, "b": 90, "c": 60}
+    assert rows[1]["agent_id"] == "b" and ex["seller"] == "a" and ex["token"] == "A1"
+    assert rows[2]["data"]["credits"]["c"] == 58  # message burned 2
+    assert rows[3]["data"]["completed"] == ["b"] and rows[3]["data"]["submissions"]["b"] == 1
+    end = rows[5]["data"]
+    assert end["phase"] == "between" and end["outcome"] == "fail"
+
+
+async def test_failed_resale_is_flagged_in_log(tmp_path):
+    b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await b.buy("b", "A1", "a")
+    await b.buy("c", "A1", "b")  # b passes A1 on
+    with pytest.raises(MarketError) as e:  # b no longer has A1 to sell to a
+        await b.buy("a", "A1", "b")
+    assert e.value.code == "seller_lacks_token" and "previously" not in e.value.message  # agents see nothing extra
+    with pytest.raises(MarketError):  # b never had A2: a plain failure, not a resale
+        await b.buy("c", "A2", "b")
+    fails = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "buy_failed"]
+    assert fails[0]["seller_previously_held"] is True and fails[0]["current_holders"] == ["c"]
+    assert fails[1]["reason"] == "seller_lacks_token" and fails[1]["seller_previously_held"] is False
+    # No new state row for a failed buy: the state didn't change.
+    rows = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "graph_state"]
+    assert [r["cause"] for r in rows] == ["round_start", "exchange", "exchange"]
+
+
+async def test_passing_a_token_back_is_allowed(tmp_path):
+    b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await b.buy("b", "A1", "a")
+    await b.buy("a", "A1", "b")  # back to its first holder (edge b -> a): a cycle, not an anomaly
+    assert b.holds["a"] == {"A1", "A2"} and "A1" not in b.holds["b"]
+    kinds = [e["kind"] for e in read_jsonl(tmp_path / "m.jsonl")]
+    assert "buy_failed" not in kinds and "unexplained_knowledge" not in kinds

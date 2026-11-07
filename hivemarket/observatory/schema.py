@@ -3,7 +3,7 @@
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
            Market events of note: round_start, balances (every agent's credits after each change),
-           exchange, message, buy_failed, submission,
+           graph_state (full market state after each change), exchange, message, buy_failed, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
