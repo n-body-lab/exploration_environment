@@ -12,11 +12,14 @@ maps onto ours:
   task (unordered set)               needs, in token-id order. Agents still submit it with
                                      submit_answer (our off-channel knowledge check), which costs
                                      nothing, so the benchmark is unchanged
-  execution messages (buyer, seller) per sale: the offer tax (1, the buyer's first message) plus
-                                     market.execution_fee = {buyer: buyer messages - 1, seller: seller
-                                     messages}, so a sale costs exactly what the generator charges
-  exploratory message (1 credit)     an offer that never leads to a sale, or a free-text message per
-                                     recipient when market.messages is on (communication_cost: 1)
+  execution messages (buyer, seller) per sale: the offer tax (market.offer_tax 1-credit messages from
+                                     the buyer) plus market.execution_fee = {buyer: buyer messages -
+                                     offer_tax, seller: seller messages}, so a sale costs exactly what the
+                                     generator charges. An offer tax above the market's buyer messages
+                                     raises them to the tax (see played_market) and the ideal is re-solved
+  exploratory message (1 credit)     each credit of an offer's tax when the offer never leads to a sale,
+                                     or a free-text message per recipient when market.messages is on
+                                     (communication_cost: 1)
   initial balances                   credits; can be 0 (such an agent can sell, unless sellers pay a fee,
                                      but not buy or offer)
 
@@ -89,15 +92,24 @@ def build_world(cfg: ExperimentConfig, agent_ids: list[str], base_dir: Path) -> 
     market, balances = result.market, result.initial_state.balances
     solution, status = _benchmark(result)
     impossible: dict[str, list[str]] = {}
-    impossibility = None
+    impossibility = offer_tax = None
     if cfg.tasks.impossible:
         market, balances, impossible = _make_impossible(cfg, agent_ids, market, balances)
+    generated_buyer_messages = market.communication.buyer
+    market = played_market(market, cfg.market.offer_tax)
+    raised = market.communication.buyer != generated_buyer_messages
+    if cfg.tasks.impossible or raised:  # the market changed after generation: prove its ideal again
         initial = g.initial_state(market, balances)
         proof = g.solve_exact(market, initial, state_limit=result.config.exact_state_limit or 20000,
                               incumbent=_still_valid(market, initial, solution))
         solution, status = proof.best_solution, _proof_status(proof.conclusion)
-        impossibility = {"modes": impossible, "conclusion": proof.conclusion, "solver_status": proof.status,
-                         "proof_scope": proof.proof_scope, "termination_reason": proof.termination_reason}
+        conclusion = {"conclusion": proof.conclusion, "solver_status": proof.status,
+                      "proof_scope": proof.proof_scope, "termination_reason": proof.termination_reason}
+        if cfg.tasks.impossible:
+            impossibility = {"modes": impossible, **conclusion}
+        if raised:
+            offer_tax = {"offer_tax": cfg.market.offer_tax, "generated_buyer_messages": generated_buyer_messages,
+                         **conclusion}
 
     fee = execution_fee(market, cfg.market.offer_tax)
     if "execution_fee" in cfg.market.model_fields_set and cfg.market.execution_fee.model_dump() != fee:
@@ -107,6 +119,8 @@ def build_world(cfg: ExperimentConfig, agent_ids: list[str], base_dir: Path) -> 
     ideal = generator_ideal(market, solution, status, agent_ids) | {"graph_ideal": graph_ideal(graph, cfg, fee)}
     world = graph_to_world(graph, cfg, impossible, execution_fee=fee, ideal=ideal)
     world["generated"] = _summary(g, cfg, result, market, balances, agent_ids, impossibility)
+    # Set when the offer tax raised the market's buyer messages: `market` above is the market as played.
+    world["generated"]["offer_tax"] = offer_tax
     return world, g.dumps(result)
 
 
@@ -215,13 +229,25 @@ def to_graph(market, balances: tuple[int, ...], names: list[str]) -> GraphSpec:
     return GraphSpec(nodes=nodes, edges=edges)
 
 
+def played_market(market, offer_tax: int):
+    """The market as HiveMarket plays it at `offer_tax`.
+
+    Every sale needs an offer, whose tax is `offer_tax` 1-credit buyer messages, so a sale can't cost the
+    buyer fewer messages than that. A tax above the market's buyer execution messages raises them to the
+    tax; a lower one is made up by the buyer's execution fee. The market is otherwise unchanged.
+    """
+    if market.communication.buyer >= offer_tax:
+        return market
+    g = generator()
+    from hivemarket_generator.models import ExecutionMessages
+    return g.Market(market.prices, market.tasks, market.initial_owners,
+                    ExecutionMessages(offer_tax, market.communication.seller))
+
+
 def execution_fee(market, offer_tax: int) -> dict[str, int]:
-    """Our execution fee for a generated market: the generator's per-sale messages minus the offer tax,
-    which already charges the buyer's first (every sale needs an offer)."""
-    if market.communication.buyer < offer_tax:
-        raise ValueError(f"this market charges buyers {market.communication.buyer} execution message(s) per sale, "
-                         f"but every sale needs an offer, which costs {offer_tax}")
-    return {"buyer": market.communication.buyer - offer_tax, "seller": market.communication.seller}
+    """Our execution fee for a market as played (`played_market`): the generator's per-sale messages minus
+    the offer tax, which already charges the buyer's first ones (every sale needs an offer)."""
+    return {"buyer": max(0, market.communication.buyer - offer_tax), "seller": market.communication.seller}
 
 
 def generator_ideal(market, solution, status: str, names: list[str]) -> dict[str, Any]:

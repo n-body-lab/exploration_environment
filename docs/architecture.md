@@ -161,7 +161,7 @@ tasks:
 
 - **Inputs.** The agent count comes from `agents` and the seed from the experiment's `seed`; `tasks.market` may not set either. A `file` is resolved relative to the experiment file. A family or file fixes its own agent count, so `agents` must add up to it. Unknown `market` fields are rejected, and so is any setting the generator's rules can't run under:
   - `market.token_transfer: copy`
-  - a `market.offer_tax` other than 1, or a `communication_cost` other than 1 (it defaults to 1; it only matters with `market.messages: true`): the generator counts every message as 1 credit
+  - a `communication_cost` other than 1 (it defaults to 1; it only matters with `market.messages: true`): the generator counts every message as 1 credit
   - a `market.execution_fee` that differs from the market's (leave it out to use the market's)
   - `graph:` together with a generated market
 - **Conversion.**
@@ -173,11 +173,12 @@ tasks:
   | `P[buyer][seller]`, every pair | edge seller → buyer at that cost (a complete graph) |
   | `initial_owners` | `holds`; tokens are unique, so `token_transfer: move` |
   | task (an unordered set; may be empty or include a starting token) | `needs` in token-id order. Agents still submit it with `submit_answer`, our off-channel knowledge check; it costs nothing, so the benchmark is unchanged. |
-  | execution messages per sale (buyer, seller) | the offer tax (1, the buyer's first message: every sale needs an offer) plus `market.execution_fee` = {buyer: buyer messages − 1, seller: seller messages}, so a sale costs exactly what the generator charges |
-  | exploratory message, 1 credit | an offer that never leads to a sale, or each recipient of a free-text message when those are on |
+  | execution messages per sale (buyer, seller) | the offer tax (`market.offer_tax` 1-credit messages from the buyer: every sale needs an offer) plus `market.execution_fee` = {buyer: buyer messages − offer tax (at least 0), seller: seller messages}, so a sale costs exactly what the generator charges |
+  | exploratory message, 1 credit | each credit of the tax of an offer that never leads to a sale, or each recipient of a free-text message when those are on |
   | budgets (reference + leeway; can be 0) | `credits`. An agent with 0 credits can sell (unless sellers pay an execution fee) but not buy or offer. |
 
   The mapping is kept in `world.json` (`generated.agents`, `generated.tokens`).
+- **Offer tax.** Any `market.offer_tax` works, so the tax can be varied across conditions. A tax below the market's buyer execution messages (1 by default) is made up by the buyer's execution fee, so the market is unchanged. A tax above them raises them to the tax: a sale then costs the buyer `offer_tax` messages. The ideal is solved again on that market, and the result can be infeasible when budgets no longer cover the trades. `world.json` then records `generated.offer_tax` (the tax, the generator's buyer messages and the solver's conclusion), and `generated.market` is the market as played, which is what rounds are reconciled against.
 - **Ideal.** The round's ideal comes from the generator's `optimal_solution`, or its `best_solution` when there is no proof:
   - `ideal_credits` = gross payments + execution messages (offer taxes + execution fees)
   - `ideal_transfers`, `ideal_execution_messages`, `ideal_gross_payments`

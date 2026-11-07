@@ -230,8 +230,8 @@ class ExecutionFee(BaseModel):
 
     Both sides must be able to afford their part before the trade: when the seller SELLs, the
     buyer's is reserved with the price and the seller's is reserved too; both are burned on BUY.
-    In a market_generator game the offer tax plays the generator's first buyer execution message,
-    so this carries the rest: buyer = buyer messages - 1, seller = seller messages.
+    In a market_generator game the offer tax plays the generator's first buyer execution messages,
+    so this carries the rest: buyer = buyer messages - offer_tax (at least 0), seller = seller messages.
     """
 
     model_config = {"extra": "forbid"}
@@ -340,13 +340,12 @@ class ExperimentConfig(BaseModel):
 
     def _check_generated(self) -> None:
         """A market_generator game runs under the generator's rules: unique tokens, and 1-credit messages
-        (an offer is one, and so is each recipient of a free-text message when those are on)."""
+        (an offer's tax is `offer_tax` of them, and each recipient of a free-text message is one when those
+        are on). Any offer tax works: hivemarket.game.generated.played_market adapts the market to it."""
         if self.graph:
             raise ValueError("graph: and a market_generator game are exclusive; remove one")
         if self.market.token_transfer != "move":
             raise ValueError("market_generator markets have unique tokens: market.token_transfer must be move")
-        if self.market.offer_tax != 1:
-            raise ValueError("market_generator counts every message as 1 credit: market.offer_tax must be 1")
         if "communication_cost" not in self.model_fields_set:
             self.communication_cost = 1
         elif self.communication_cost != 1:

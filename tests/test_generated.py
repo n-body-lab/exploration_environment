@@ -227,6 +227,46 @@ async def test_messages_are_reconciled_and_a_tampered_ledger_is_not(tmp_path):
 
 
 @needs_generator
+@pytest.mark.parametrize("tax", [0, 1, 2, 3])
+async def test_any_offer_tax_plays_the_generated_market_and_reconciles(tmp_path, tax):
+    """The offer tax is the main experiment's message cost. Below the market's buyer messages (1) the
+    execution fee makes up the rest; above them the market charges buyers the tax and is re-solved."""
+    world, _ = build(config(market={"offer_tax": tax}))
+    assert world["rules"]["offer_tax"] == tax
+    assert world["rules"]["execution_fee"] == {"buyer": max(0, 1 - tax), "seller": 0}
+    assert world["generated"]["market"]["communication"] == {"buyer": max(1, tax), "seller": 0}
+    assert (world["generated"]["offer_tax"] is None) == (tax <= 1)
+    ideal = world["ideal"]
+    assert ideal["solvable"] and ideal["ideal_status"] == "optimal"
+
+    b = await broker_for(world, tmp_path)
+    for x in ideal["schedule"]:
+        await trade(b, x["buyer"], x["token"], x["seller"])
+    await submit_all(b)
+    res = b.results[0]
+    assert res["outcome"] == "pass" and res["credits_spent"] == ideal["ideal_credits"]
+    assert res["economic_validation"] == {"status": "valid", "transfers": ideal["ideal_transfers"], "messages": 0}
+
+    # an offer that never leads to a sale is `tax` exploratory messages
+    b = await broker_for(world, tmp_path / "unsold")
+    unsold = await b.make_offer("agent-1", "T1", "agent-3")
+    await b.withdraw_offer("agent-1", unsold["offer_id"])
+    res = await b.end_round("fail", "test")
+    assert res["economic_validation"] == {"status": "valid", "transfers": 0, "messages": tax}
+
+
+@needs_generator
+def test_an_offer_tax_the_budgets_cant_cover_is_proven_infeasible():
+    # medium.json: agent-2 has 3 credits and needs T1 at price 2, so a tax of 2 leaves it 1 short
+    world, _ = build(config({"file": "data/market_generator_medium.json"}, market={"offer_tax": 2}), base_dir=TESTS)
+    assert (world["ideal"]["solvable"], world["ideal"]["ideal_status"], world["ideal"]["ideal_credits"]) == \
+        (False, "infeasible", None)
+    assert world["generated"]["offer_tax"] | {"proof_scope": None} == {
+        "offer_tax": 2, "generated_buyer_messages": 1, "conclusion": "infeasible", "solver_status": "infeasible",
+        "proof_scope": None, "termination_reason": "exhausted"}
+
+
+@needs_generator
 async def test_goal_relevant_fragile_bad_and_good_first_purchase(tmp_path):
     cfg = config({"family": "goal_relevant_fragile", "fragility": True}, agents=2, seed=42)
     world, _ = build(cfg)
