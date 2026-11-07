@@ -316,14 +316,18 @@ def _move_walks(costs: dict[tuple[str, str], int], comm: int, holders: list[str]
 
 
 def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
-               token_transfer: Literal["move", "copy"] = "move",
+               token_transfer: Literal["move", "copy"] = "move", transfer_tax: int = 0,
                execution_fee: dict[str, int] | None = None) -> dict[str, Any]:
-    """`execution_fee` ({buyer, seller}) is burned on every exchange: it weighs on routing and on each side's
-    budget, while `exchanges` keep listing the edge price."""
+    """`communication_cost`: what asking a relay to pass a token on costs (one message).
+    `transfer_tax`: what every transfer costs on top of its price (the offer tax: each purchase
+    needs at least one offer). With offers, a relay is asked by the offer itself, so runs use
+    communication_cost=0 and transfer_tax=offer_tax.
+    `execution_fee` ({buyer, seller}): burned on every transfer too; it weighs on routing and on each
+    side's budget. `exchanges` keep listing the edge price and the tax."""
     fee_b, fee_s = (execution_fee or {}).get("buyer", 0), (execution_fee or {}).get("seller", 0)
     nodes = list(graph.nodes)
-    costs = graph.edge_costs()
-    weights = {e: c + fee_b + fee_s for e, c in costs.items()}  # what an exchange really costs
+    edge_price = graph.edge_costs()
+    costs = {k: c + transfer_tax + fee_b + fee_s for k, c in edge_price.items()}  # what a transfer costs in all
     tokens = sorted({t for n in graph.nodes.values() for t in n.needs})
     per_token: dict[str, Any] = {}
     unreachable: list[dict[str, str]] = []
@@ -344,26 +348,28 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
         if not terms:
             continue
         if token_transfer == "move":
-            cost, walks, covered = _move_walks(weights, communication_cost, sorted(holders), terms)
+            cost, walks, covered = _move_walks(costs, communication_cost, sorted(holders), terms)
             unreachable += [{"node": n, "token": tok, "reason": NO_SINGLE_CHAIN} for n in terms if n not in covered]
             hops = [hp for w in walks for hp in w["hops"]]
             relay_hops = [v for _, v, is_relay in hops if is_relay]
             per_token[tok] = {
                 "credits": int(cost),
                 # in walk order; an edge can appear more than once when a walk revisits a node
-                "exchanges": [{"from": u, "to": v, "cost": costs[(u, v)], "relay": is_relay} for u, v, is_relay in hops],
+                "exchanges": [{"from": u, "to": v, "cost": edge_price[(u, v)], "tax": transfer_tax, "relay": is_relay}
+                              for u, v, is_relay in hops],
                 "walks": [[w["holder"]] + [v for _, v, _ in w["hops"]] for w in walks],
                 "relays": sorted(set(relay_hops)),
                 "relay_messages": len(relay_hops),
             }
         else:
             weight = {(u, v): c + (communication_cost if v not in holders and v not in needers else 0)
-                      for (u, v), c in weights.items()}
+                      for (u, v), c in costs.items()}
             cost, tree = _steiner(nodes, weight, holders, terms)
             relays = sorted({v for _, v in tree if v not in needers and v not in holders})
             per_token[tok] = {
                 "credits": int(cost),
-                "exchanges": [{"from": u, "to": v, "cost": costs[(u, v)]} for u, v in sorted(tree)],
+                "exchanges": [{"from": u, "to": v, "cost": edge_price[(u, v)], "tax": transfer_tax}
+                              for u, v in sorted(tree)],
                 "relays": relays,
                 "relay_messages": len(relays),
             }
@@ -373,7 +379,7 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     spend: dict[str, int] = {}
     for info in per_token.values():
         for x in info["exchanges"]:
-            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + fee_b
+            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + x.get("tax", 0) + fee_b
             spend[x["from"]] = spend.get(x["from"], 0) + fee_s
     shortfalls = {n: c - graph.nodes[n].credits for n, c in spend.items() if c > graph.nodes[n].credits}
     return {
@@ -391,8 +397,10 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
 
 
 def graph_ideal(graph: GraphSpec, cfg: ExperimentConfig, execution_fee: dict[str, int]) -> dict[str, Any]:
-    """`ideal_cost` under the experiment's rules, execution fees included."""
-    return ideal_cost(graph, cfg.communication_cost, cfg.market.token_transfer, execution_fee)
+    """`ideal_cost` under the experiment's rules: every transfer pays its price, the offer tax and the
+    execution fees, and relays are asked by offers (no separate message)."""
+    return ideal_cost(graph, 0, cfg.market.token_transfer, transfer_tax=cfg.market.offer_tax,
+                      execution_fee=execution_fee)
 
 
 def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str, list[str]], *,
@@ -406,6 +414,7 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
         "communication_cost": cfg.communication_cost,
         "seed": cfg.seed,
         "rounds": cfg.rounds.model_dump() | {"round_seconds": cfg.round_seconds},
+        # Offers are how demand travels (a relay is asked by an offer), so no separate relay message.
         "ideal": ideal if ideal is not None else graph_ideal(graph, cfg, fee),
         "impossible": impossible,  # generator ground truth; not exposed to agents
         "rules": {
@@ -413,7 +422,9 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "graph_visibility": cfg.market.graph_visibility,
             "max_submissions": cfg.market.max_submissions,
             "token_transfer": cfg.market.token_transfer,
-            "order_timeout_seconds": cfg.market.order_timeout_seconds,
+            "offer_tax": cfg.market.offer_tax,
+            "messages": cfg.market.messages,
+            "sale_timeout_seconds": cfg.market.sale_timeout_seconds,
             "execution_fee": fee,
         },
     }

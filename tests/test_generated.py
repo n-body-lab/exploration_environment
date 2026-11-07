@@ -41,9 +41,9 @@ async def broker_for(world, tmp_path) -> Broker:
 
 
 async def trade(b: Broker, buyer: str, token: str, seller: str) -> None:
-    o = await b.place_order(buyer, token, seller)
-    await b.respond_to_order(seller, o["order_id"], True)
-    await b.commit_order(buyer, o["order_id"])
+    o = await b.make_offer(buyer, token, seller)
+    await b.sell(seller, o["offer_id"])
+    await b.buy(buyer, o["offer_id"])
 
 
 async def submit_all(b: Broker) -> None:
@@ -100,13 +100,13 @@ def test_a_generator_export_converts_to_our_graph():
     # complete graph: edge seller -> buyer at P[buyer][seller] (all 2 here)
     assert sorted((e["from"], e["to"], e["cost"]) for e in world["edges"]) == \
         [(s, d, 2) for s in names for d in names if s != d]
-    assert world["rules"]["execution_fee"] == {"buyer": 1, "seller": 0} and world["rules"]["token_transfer"] == "move"
-    assert world["communication_cost"] == 1
+    # the market charges buyers 1 execution message per sale: the offer tax (1) covers it, so no extra fee
+    assert world["rules"]["execution_fee"] == {"buyer": 0, "seller": 0} and world["rules"]["offer_tax"] == 1
+    assert world["rules"]["token_transfer"] == "move" and world["communication_cost"] == 1
     ideal = world["ideal"]
     assert (ideal["source"], ideal["ideal_status"], ideal["ideal_credits"]) == ("market_generator", "optimal", 3)
     assert (ideal["ideal_transfers"], ideal["ideal_execution_messages"], ideal["ideal_gross_payments"]) == (1, 1, 2)
-    assert ideal["schedule"] == [{"buyer": "agent-2", "seller": "agent-1", "token": "T1", "price": 2,
-                                  "buyer_fee": 1, "seller_fee": 0}]
+    assert ideal["schedule"] == [{"buyer": "agent-2", "seller": "agent-1", "token": "T1", "price": 2}]
     assert ideal["graph_ideal"]["ideal_credits"] == 3  # our model agrees here: one direct purchase
     assert (world["generated"]["agents"], world["generated"]["tokens"]) == (names, ["T1", "T2"])
     original = json.loads((TESTS / "data" / "market_generator_medium.json").read_text())["data"]
@@ -162,11 +162,13 @@ async def test_reference_schedule_replays_through_the_broker(tmp_path):
     res = b.results[0]
     messages, transfers, gross = reference.objective
     assert res["outcome"] == "pass"
-    assert res["credits_spent"] == gross + messages and res["credits_spent_on_fees"] == messages
+    assert res["credits_spent"] == gross + messages
+    assert res["objective"] == [messages, transfers, gross]  # the generator's own objective, exactly
     assert res["credits_check"]["consistent"]
     assert res["economic_validation"] == {"status": "valid", "transfers": transfers, "messages": 0}
     saved = json.loads((tmp_path / "rounds" / "round-1.json").read_text())
-    assert len(saved["ledger"]) == transfers and saved["end_state"]["credits"] == res["credits_remaining"]
+    assert [x["kind"] for x in saved["ledger"]].count("transfer") == transfers
+    assert saved["end_state"]["credits"] == res["credits_remaining"]
 
 
 @needs_generator
@@ -203,37 +205,42 @@ async def test_agents_are_told_when_the_ideal_is_not_proven(tmp_path):
 async def test_messages_are_reconciled_and_a_tampered_ledger_is_not(tmp_path):
     from hivemarket.game.generated import reconcile
 
-    world, _ = build(config())
+    # seed 1: agent-1 (10 credits) needs T1, held by agent-2, who sells it to agent-1 for 7
+    world, _ = build(config(market={"messages": True}))
+    assert world["nodes"]["agent-2"]["holds"][0] == "T1" and "T1" in world["nodes"]["agent-1"]["needs"]
     b = await broker_for(world, tmp_path)
-    await b.send_message("agent-1", "*", "who holds T1?")  # one 1-credit exploratory message per recipient
-    tokens = world["generated"]["tokens"]
-    seller = next(n for n, s in b.spec.items() if tokens[0] in s["holds"])
-    buyer = next(n for n in b.agents if n != seller and b.available(n) > b.costs[(seller, n)] + 1)
-    await trade(b, buyer, tokens[0], seller)
+    await b.send_message("agent-3", "*", "who holds T1?")  # one 1-credit exploratory message per recipient
+    unsold = await b.make_offer("agent-1", "T1", "agent-3")  # never sold: an exploratory message too
+    await b.withdraw_offer("agent-1", unsold["offer_id"])
+    await trade(b, "agent-1", "T1", "agent-2")  # this offer is the sale's buyer execution message
     res = await b.end_round("fail", "test")
-    assert res["economic_validation"] == {"status": "valid", "transfers": 1, "messages": 2}
+    assert res["economic_validation"] == {"status": "valid", "transfers": 1, "messages": 3}
 
     saved = json.loads((tmp_path / "rounds" / "round-1.json").read_text())
     overcharged = [dict(x, price=x["price"] + 1) if x["kind"] == "transfer" else x for x in saved["ledger"]]
     assert reconcile(world["generated"], overcharged, saved["end_state"])["status"] == "invalid"
-    missing_message = saved["ledger"][1:]
+    missing_message = saved["ledger"][1:]  # drop the broadcast
     assert "balances" in reconcile(world["generated"], missing_message, saved["end_state"])["error"]
+    # a ledger in an older format (sales without offer ids) is reported, never raised
+    old_format = [{k: v for k, v in x.items() if k != "offer_id"} for x in saved["ledger"] if x["kind"] != "offer"]
+    assert reconcile(world["generated"], old_format, saved["end_state"])["status"] == "invalid"
 
 
 @needs_generator
 async def test_goal_relevant_fragile_bad_and_good_first_purchase(tmp_path):
     cfg = config({"family": "goal_relevant_fragile", "fragility": True}, agents=2, seed=42)
     world, _ = build(cfg)
-    assert world["rules"]["execution_fee"] == {"buyer": 1, "seller": 1}
+    # 1 buyer and 1 seller execution message per sale: the offer tax covers the buyer's, the fee the seller's
+    assert world["rules"]["execution_fee"] == {"buyer": 0, "seller": 1}
     assert world["generated"]["fragility"]["goal_relevant_fragility"] == 0.5
 
     # Bad: agent-1 buys first and spends everything, so it can never pay the seller fee on the other trade.
     bad = await broker_for(world, tmp_path / "bad")
     await trade(bad, "agent-1", "T2", "agent-2")
     assert bad.credits["agent-1"] == 0
-    order = await bad.place_order("agent-2", "T1", "agent-1")
+    offer = await bad.make_offer("agent-2", "T1", "agent-1")
     with pytest.raises(MarketError) as e:
-        await bad.respond_to_order("agent-1", order["order_id"], True)
+        await bad.sell("agent-1", offer["offer_id"])
     assert e.value.code == "insufficient_credits"  # agent-2 can never get T1: the round can't be won
 
     # Good: agent-2 buys first; both trades go through and the round passes at the ideal.
@@ -302,7 +309,9 @@ async def test_generator_data_never_reaches_agents(tmp_path, visibility):
         prompt = render_system_prompt(runtime, status)
         seen = json.dumps([status, b.graph_view(agent)]) + prompt + kickoff_text(status) + runtime.model_dump_json()
         assert not [s for s in GENERATOR_ONLY if s in seen], agent
-        assert "execution fee" in prompt and status["execution_fee"] == {"buyer": 1, "seller": 0}
+        # the offer tax plays the generator's buyer message, so there is no extra fee and no fee note
+        assert status["execution_fee"] == {"buyer": 0, "seller": 0} and status["offer_tax"] == 1
+        assert "execution fee" not in prompt
 
 
 # --------------------------------------------------------------- end to end
@@ -321,8 +330,9 @@ async def test_local_generated_run_reports_difficulty_and_reconciles_on_the_host
     await run_local(run_dir)
     report = write_report(run_dir).read_text()
     rounds = json.loads((run_dir / "summary.json").read_text())["rounds"]
-    assert rounds and all(r["economic_validation"] == {"status": "valid", "transfers": len(r["exchanges"]),
-                                                       "messages": 0, "checked_by": "report"} for r in rounds)
+    # offers that never led to a sale are exploratory messages; every round still reconciles
+    assert rounds and all(r["economic_validation"]["status"] == "valid" and r["economic_validation"]["checked_by"]
+                          == "report" and r["economic_validation"]["transfers"] == len(r["exchanges"]) for r in rounds)
     assert "## Market difficulty" in report and "proven optimal for its objective" in report and "| valid |" in report
     assert "HiveMarket graph ideal: " in report  # both ideals, labelled
 

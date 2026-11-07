@@ -3,9 +3,9 @@
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
            Market events of note: round_start, balances (every agent's credits after each change),
-           graph_state (full market state after each change), order_placed / order_accepted /
-           order_declined / order_committed / order_cancelled / order_expired / order_aborted,
-           order_failed, exchange, message, submission,
+           graph_state (full market state after each change), offer_made / offer_withdrawn /
+           sale_started / sale_completed / sale_lapsed / sale_unaffordable / offer_cleared,
+           offer_failed, exchange, message, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
            For market_generator games `world` carries the generator's difficulty (v_run_difficulty).
@@ -102,6 +102,7 @@ STATEMENTS = [
     WHERE source = 'gateway' AND kind = 'llm_call'
     """,
     f"DROP VIEW IF EXISTS {DATABASE}.v_trades",
+    f"DROP VIEW IF EXISTS {DATABASE}.v_orders",  # replaced by v_offers
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_exchanges AS
     SELECT run_id, ts,
@@ -113,30 +114,33 @@ STATEMENTS = [
            JSONExtractInt(data, 'buyer_fee') AS buyer_fee,
            JSONExtractInt(data, 'seller_fee') AS seller_fee,
            JSONExtractBool(data, 'relay') AS relay,
-           JSONExtractString(data, 'order_id') AS order_id
+           JSONExtractString(data, 'offer_id') AS offer_id
     FROM {DATABASE}.events FINAL
     WHERE source = 'market' AND kind = 'exchange'
     """,
     f"""
-    CREATE OR REPLACE VIEW {DATABASE}.v_orders AS
+    CREATE OR REPLACE VIEW {DATABASE}.v_offers AS
     SELECT run_id,
-           JSONExtractString(data, 'order_id') AS order_id,
+           JSONExtractString(data, 'offer_id') AS offer_id,
            any(JSONExtractUInt(data, 'round')) AS round,
            any(JSONExtractString(data, 'buyer')) AS buyer,
            any(JSONExtractString(data, 'seller')) AS seller,
            any(JSONExtractString(data, 'token')) AS token,
-           anyIf(JSONExtractInt(data, 'price'), kind = 'order_placed') AS price,
-           argMax(replaceOne(kind, 'order_', ''), JSONExtractUInt(data, 'seq')) AS final_status,
-           minIf(ts, kind = 'order_placed') AS placed_at,
-           minIf(ts, kind = 'order_accepted') AS accepted_at,
-           max(ts) AS closed_at,
-           anyIf(JSONExtractBool(data, 'seller_holds'), kind = 'order_placed') AS seller_held_token,
-           anyIf(JSONExtractBool(data, 'seller_previously_held'), kind = 'order_placed') AS seller_previously_held,
-           anyIf(JSONExtractString(data, 'reason'), kind = 'order_cancelled') AS cancel_reason
+           anyIf(JSONExtractInt(data, 'price'), kind = 'offer_made') AS price,
+           multiIf(countIf(kind = 'sale_completed') > 0, 'executed', countIf(kind = 'offer_withdrawn') > 0, 'withdrawn',
+                   countIf(kind = 'offer_cleared') > 0, 'cleared', 'open') AS final_status,
+           countIf(kind = 'sale_started') AS sales_started,
+           countIf(kind = 'sale_lapsed') AS sales_lapsed,
+           countIf(kind = 'sale_unaffordable') AS sales_unaffordable,
+           minIf(ts, kind = 'offer_made') AS made_at,
+           minIf(ts, kind = 'sale_started') AS first_sale_at,
+           maxIf(ts, kind = 'sale_completed') AS completed_at,
+           anyIf(JSONExtractBool(data, 'seller_holds'), kind = 'offer_made') AS seller_held_token,
+           anyIf(JSONExtractBool(data, 'seller_previously_held'), kind = 'offer_made') AS seller_previously_held
     FROM {DATABASE}.events FINAL
-    WHERE source = 'market' AND kind IN ('order_placed', 'order_accepted', 'order_declined', 'order_committed',
-                                         'order_cancelled', 'order_expired', 'order_aborted')
-    GROUP BY run_id, order_id
+    WHERE source = 'market' AND kind IN ('offer_made', 'offer_withdrawn', 'offer_cleared', 'sale_started',
+                                         'sale_completed', 'sale_lapsed', 'sale_unaffordable')
+    GROUP BY run_id, offer_id
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_messages AS

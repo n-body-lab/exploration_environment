@@ -226,11 +226,12 @@ class RoundsConfig(BaseModel):
 
 
 class ExecutionFee(BaseModel):
-    """Credits burned (paid to nobody) on every completed purchase, by each side.
+    """Credits burned (paid to nobody) on every completed sale, by each side, on top of the price.
 
-    Both sides must be able to afford their part before the trade: the buyer's is set aside
-    with the price when it orders, the seller's when it accepts. market_generator markets
-    charge buyer 1 / seller 0 by default.
+    Both sides must be able to afford their part before the trade: when the seller SELLs, the
+    buyer's is reserved with the price and the seller's is reserved too; both are burned on BUY.
+    In a market_generator game the offer tax plays the generator's first buyer execution message,
+    so this carries the rest: buyer = buyer messages - 1, seller = seller messages.
     """
 
     model_config = {"extra": "forbid"}
@@ -249,10 +250,17 @@ class MarketConfig(BaseModel):
     # move: a sale transfers the token, so the seller no longer holds (or can resell) it but still
     # knows its content. copy: the seller keeps a copy (non-rival tokens; the original behaviour).
     token_transfer: Literal["move", "copy"] = "move"
-    # Buy orders (two-phase commit): how long a seller has to answer an order, and then how
-    # long the buyer has to commit an accepted one, before the broker expires it.
-    order_timeout_seconds: float = Field(90.0, gt=0)
-    # For generated markets it comes from the market itself; set it only to check it matches.
+    # Trading (see market/state.py): an OFFER signals demand and costs `offer_tax` credits, burned
+    # and never refunded. Once a seller SELLs on an offer, the buyer has `sale_timeout_seconds` to
+    # BUY before the reservation is released and the offer goes back to open.
+    offer_tax: int = Field(1, ge=0)
+    sale_timeout_seconds: float = Field(90.0, gt=0)
+    # Free-text broker messages (send_message), at `communication_cost` per recipient. Off by default:
+    # in the game spec, offers are the only legitimate communication (§4.3, §5.2). Turning them on is
+    # an experimental condition: agents can then describe needs in plain language, and lie.
+    messages: bool = False
+    # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
+    # comes from the market itself; set it only to check it matches.
     execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
 
 
@@ -303,7 +311,7 @@ class ExperimentConfig(BaseModel):
     affordance: AffordanceConfig = Field(default_factory=AffordanceConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     graph: GraphSpec | None = None  # explicit game; overrides `tasks` (except a market_generator game)
-    # credits burned by the sender per message per recipient; 1 (and only 1) for market_generator games
+    # per message per recipient, when market.messages is on; 1 (and only 1) for market_generator games
     communication_cost: int = Field(default=0, ge=0)
     rounds: RoundsConfig = Field(default_factory=RoundsConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -331,11 +339,14 @@ class ExperimentConfig(BaseModel):
         return self
 
     def _check_generated(self) -> None:
-        """A market_generator game runs under the generator's rules (unique tokens, 1-credit messages)."""
+        """A market_generator game runs under the generator's rules: unique tokens, and 1-credit messages
+        (an offer is one, and so is each recipient of a free-text message when those are on)."""
         if self.graph:
             raise ValueError("graph: and a market_generator game are exclusive; remove one")
         if self.market.token_transfer != "move":
             raise ValueError("market_generator markets have unique tokens: market.token_transfer must be move")
+        if self.market.offer_tax != 1:
+            raise ValueError("market_generator counts every message as 1 credit: market.offer_tax must be 1")
         if "communication_cost" not in self.model_fields_set:
             self.communication_cost = 1
         elif self.communication_cost != 1:
@@ -402,6 +413,7 @@ class AgentRuntimeConfig(BaseModel):
     max_tokens_param: str = "max_tokens"
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
+    messages: bool = False  # market.messages: whether the agent gets the send_message tool
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30

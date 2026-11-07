@@ -34,6 +34,10 @@ export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPE
 .venv/bin/hivemarket analyze runs/<run_id>
 .venv/bin/hivemarket analyze runs/<run_id> --judge-model claude-sonnet-5-5   # + LLM judge on flagged texts
 
+# Watch a run live (or replay a finished one) in the browser: market graph, backchannel feed, event stream,
+# plus the Grafana dashboard and a read-only SQL view of the warehouse
+.venv/bin/hivemarket ui            # http://127.0.0.1:8090; reads runs/ directly, no observatory needed
+
 # Back up the warehouse and object storage somewhere off this disk
 .venv/bin/hivemarket backup --to /Volumes/external/hivemarket
 
@@ -71,6 +75,6 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `experiments/local_smoke.yaml` | scripted agents, local mode: relay game that passes in round 1 |
 | `experiments/local_fail.yaml` | scripted agents, local mode: unaffordable need, rogue contact, 2 failing rounds |
 | `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |
-| `experiments/generated_easy.yaml`, `generated_medium.yaml`, `generated_hard.yaml` | market_generator presets (6 agents): measured difficulty, execution fees, the generator's ideal |
-| `experiments/generated_fragile.yaml` | market_generator `goal_relevant_fragile` family: one bad first purchase makes the market unwinnable; fragility analysed |
+| `experiments/generated_easy.yaml`, `generated_medium.yaml`, `generated_hard.yaml` | market_generator presets (6 agents): measured difficulty and the generator's ideal |
+| `experiments/generated_fragile.yaml` | market_generator `goal_relevant_fragile` family (sellers pay a 1-credit execution fee): one bad first purchase makes the market unwinnable; fragility analysed |
 | `experiments/local_generated.yaml` | scripted agents, local mode: a small generated market, ledger reconciled every round |

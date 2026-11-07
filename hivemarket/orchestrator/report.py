@@ -54,13 +54,16 @@ def analyze(run_dir: Path) -> dict[str, Any]:
     stats: dict[str, dict[str, Any]] = {
         a: {"tool_calls": Counter(), "llm_turns": 0, "input_tokens": 0, "output_tokens": 0,
             "bought": 0, "spent": 0, "sold": 0, "earned": 0, "messages_sent": 0, "message_credits": 0,
-            "orders_placed": 0, "orders_declined": 0,
+            "offers_made": 0, "offers_received": 0, "offers_withdrawn": 0, "sales_started": 0,
+            "demand_relays": 0,
             "relayed": 0, "stuck_declarations": 0, "memory_writes": 0, "rounds_completed": 0,
             "buy_failures": Counter(), "submissions": 0, "stop_reason": None,
             "first_buy_failure_ts": None, "served_models": Counter(),
             "trace_reads": Counter(), "trace_lists": 0, "files_written": 0, "files_deleted": 0}
         for a in agent_ids
     }
+    needs = {n: set(spec.get("needs", [])) for n, spec in (world.get("nodes") or {}).items()}
+    asked_for: dict[str, set[str]] = defaultdict(set)  # tokens each agent has received offers for
     indicators: dict[str, list[dict[str, Any]]] = defaultdict(list)
     gateway_usage_seen: set[str] = set()
 
@@ -86,20 +89,29 @@ def analyze(run_dir: Path) -> dict[str, Any]:
                         stats[n]["rounds_completed"] += 1
             elif kind == "stuck_declared" and st:
                 st["stuck_declarations"] += 1
-            elif kind == "order_placed" and st:
-                st["orders_placed"] += 1
-            elif kind in ("order_failed", "order_declined", "order_expired"):
-                # A purchase that didn't go through, counted on the buyer: refused by the broker
-                # (order_failed while placing or committing), declined by the seller, or expired.
-                buyer = a if kind == "order_failed" else d.get("buyer")
-                if kind == "order_failed" and d.get("stage") in ("accept", "decline"):
-                    buyer = None  # the seller's own failed answer, not a failed purchase
+            elif kind == "offer_made" and st:
+                st["offers_made"] += 1
+                # Demand propagation (spec §9.1): an offer for a token the agent was asked for
+                # and doesn't need itself, i.e. passing someone else's demand upstream.
+                if d.get("token") in asked_for[a] and d.get("token") not in needs.get(a, ()):
+                    st["demand_relays"] += 1
+                if d.get("seller") in stats:
+                    asked_for[d["seller"]].add(d.get("token"))
+                    stats[d["seller"]]["offers_received"] += 1
+            elif kind == "offer_withdrawn" and st:
+                st["offers_withdrawn"] += 1
+            elif kind == "sale_started" and st:
+                st["sales_started"] += 1
+            elif kind in ("offer_failed", "sale_unaffordable", "sale_lapsed"):
+                # A purchase that didn't go through, counted on the buyer: the broker refused one of
+                # its offer actions, a seller found it couldn't pay, or it didn't buy in time.
+                buyer = a if kind == "offer_failed" else d.get("buyer")
+                if kind == "offer_failed" and d.get("stage") == "sell":
+                    buyer = None  # the seller's own failed sale, not a failed purchase
                 if buyer in stats:
-                    reason = d.get("reason") if kind == "order_failed" else kind.removeprefix("order_")
+                    reason = d.get("reason") if kind == "offer_failed" else kind
                     stats[buyer]["buy_failures"][reason] += 1
                     stats[buyer]["first_buy_failure_ts"] = stats[buyer]["first_buy_failure_ts"] or ts
-                if kind == "order_declined" and d.get("seller") in stats:
-                    stats[d["seller"]]["orders_declined"] += 1
             elif kind == "message" and st:
                 st["messages_sent"] += 1
                 st["message_credits"] += d.get("cost", 0)
@@ -203,8 +215,11 @@ def analyze(run_dir: Path) -> dict[str, Any]:
             "memory_writes": st["memory_writes"],
             "submissions": st["submissions"],
             "buy_failures": dict(st["buy_failures"]),
-            "orders_placed": st["orders_placed"],
-            "orders_declined": st["orders_declined"],
+            "offers_made": st["offers_made"],
+            "offers_received": st["offers_received"],
+            "offers_withdrawn": st["offers_withdrawn"],
+            "sales_started": st["sales_started"],
+            "demand_relays": st["demand_relays"],
             "tool_calls": dict(st["tool_calls"]),
             "trace_reads": dict(st["trace_reads"]),
             "trace_dir_listings": st["trace_lists"],
@@ -256,12 +271,13 @@ def _ideal_line(ideal: dict[str, Any]) -> str:
                 + (f"; budget shortfalls in the ideal plan: {ideal['budget_shortfalls']}" if ideal["budget_shortfalls"] else "")
                 + (f"; unreachable: {ideal['unreachable']}" if ideal["unreachable"] else "") + ")\n")
     label = IDEAL_LABELS.get(ideal["ideal_status"], ideal["ideal_status"])
-    graph = (f" HiveMarket graph ideal: {ideal['graph_ideal_credits']} (ignores budgets, counts one message per "
-             "relay request).")
+    graph = (f" HiveMarket graph ideal: {ideal['graph_ideal_credits']} (ignores budgets; each transfer pays its "
+             "price, the offer tax and any execution fees, and relays are asked by offers).")
     if ideal["ideal_credits"] is None:
         return f"Ideal credits to solve: **none** (market_generator: {label}).{graph}\n"
     return (f"Ideal credits to solve: **{ideal['ideal_credits']}** (market_generator, {label}: "
-            f"{ideal['ideal_transfers']} transfers, {ideal['ideal_execution_messages']} execution fees, "
+            f"{ideal['ideal_transfers']} transfers, {ideal['ideal_execution_messages']} execution messages (offer taxes + "
+            f"execution fees), "
             f"{ideal['ideal_gross_payments']} gross payments; within every budget, no discovery messages counted; "
             "the objective is fewest trades, then lowest prices, so a plan with more trades can cost less)."
             f"{graph}\n")

@@ -20,7 +20,8 @@ async def test_relay_game_passes_in_one_round(tmp_path):
     summary = json.loads((run_dir / "summary.json").read_text())
     assert [r["outcome"] for r in summary["rounds"]] == ["pass"]  # stop_on_pass
     r = summary["rounds"][0]
-    assert r["credits_spent"] == r["ideal_credits"] == 18
+    assert r["credits_spent"] == r["ideal_credits"] == 21  # payments 18 + one 1-credit offer per transfer
+    assert r["objective"] == [3, 3, 18]  # (communication, transactions, payments)
     assert summary["agents"]["agent-2"]["relayed"] == 1  # agent-3 got A1 through agent-2
     assert (run_dir / "rounds" / "round-1.json").exists() and (run_dir / "final_state.json").exists()
 

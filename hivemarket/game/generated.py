@@ -12,9 +12,13 @@ maps onto ours:
   task (unordered set)               needs, in token-id order. Agents still submit it with
                                      submit_answer (our off-channel knowledge check), which costs
                                      nothing, so the benchmark is unchanged
-  execution messages (buyer, seller) market.execution_fee, burned on every purchase
-  exploratory message (1 credit)     a broker message, per recipient (communication_cost: 1)
-  initial balances                   credits; can be 0 (such an agent can sell, not buy or message)
+  execution messages (buyer, seller) per sale: the offer tax (1, the buyer's first message) plus
+                                     market.execution_fee = {buyer: buyer messages - 1, seller: seller
+                                     messages}, so a sale costs exactly what the generator charges
+  exploratory message (1 credit)     an offer that never leads to a sale, or a free-text message per
+                                     recipient when market.messages is on (communication_cost: 1)
+  initial balances                   credits; can be 0 (such an agent can sell, unless sellers pay a fee,
+                                     but not buy or offer)
 
 Everything except `reconcile` runs on the host when a run is created. The generator needs
 Python >= 3.11 and is an optional extra installed from git (`pip install -e ".[generator]"`),
@@ -51,7 +55,7 @@ FRAGILITY_KEYS = ("goal_relevant_fragility", "goal_relevant_fragility_status",
 IDEAL_ASSUMPTIONS = (
     "market_generator's best joint schedule within every agent's budget, minimising (execution messages, "
     "transfers, gross payments) lexicographically: fewest trades first, then lowest prices. credits = gross "
-    "payments + execution fees, so a schedule with more trades can cost fewer credits (negative excess). "
+    "payments + execution messages (offer taxes + execution fees), so a schedule with more trades can cost fewer credits (negative excess). "
     "Discovery messages (asking a node to relay) are not counted. `optimal` is proven for that objective; "
     "`feasible` and `limit_reached` are the best schedule found, an upper bound on it.")
 
@@ -95,7 +99,7 @@ def build_world(cfg: ExperimentConfig, agent_ids: list[str], base_dir: Path) -> 
         impossibility = {"modes": impossible, "conclusion": proof.conclusion, "solver_status": proof.status,
                          "proof_scope": proof.proof_scope, "termination_reason": proof.termination_reason}
 
-    fee = {"buyer": market.communication.buyer, "seller": market.communication.seller}
+    fee = execution_fee(market, cfg.market.offer_tax)
     if "execution_fee" in cfg.market.model_fields_set and cfg.market.execution_fee.model_dump() != fee:
         raise ValueError(f"market.execution_fee {cfg.market.execution_fee.model_dump()} doesn't match the generated "
                          f"market's {fee}; leave it out to use the market's")
@@ -170,7 +174,8 @@ def _still_valid(market, initial, solution):
 def _make_impossible(cfg: ExperimentConfig, agent_ids: list[str], market, balances: tuple[int, ...]):
     """Apply `tasks.impossible` after generation (the generator itself only makes solvable markets).
 
-    unaffordable         the agent's budget is cut to 0 (soft: it can still earn by selling)
+    unaffordable         the agent's budget is cut to 0 (soft: it can still earn by selling, unless
+                         sellers pay an execution fee)
     unaffordable_strict  every purchase by the agent costs more than all credits in the economy
     Random targets (`count`) are drawn from agents that have to buy something: an agent whose task
     is covered by its own tokens isn't affected by either.
@@ -210,6 +215,15 @@ def to_graph(market, balances: tuple[int, ...], names: list[str]) -> GraphSpec:
     return GraphSpec(nodes=nodes, edges=edges)
 
 
+def execution_fee(market, offer_tax: int) -> dict[str, int]:
+    """Our execution fee for a generated market: the generator's per-sale messages minus the offer tax,
+    which already charges the buyer's first (every sale needs an offer)."""
+    if market.communication.buyer < offer_tax:
+        raise ValueError(f"this market charges buyers {market.communication.buyer} execution message(s) per sale, "
+                         f"but every sale needs an offer, which costs {offer_tax}")
+    return {"buyer": market.communication.buyer - offer_tax, "seller": market.communication.seller}
+
+
 def generator_ideal(market, solution, status: str, names: list[str]) -> dict[str, Any]:
     """The round's ideal for a generated game, from the generator's (optimal or best) schedule."""
     base = {"source": SOURCE, "ideal_status": status, "budget_shortfalls": {}, "unreachable": [],
@@ -217,10 +231,8 @@ def generator_ideal(market, solution, status: str, names: list[str]) -> dict[str
     if solution is None:  # proven infeasible, or nothing found within the search limit
         return base | {"solvable": False if status == "infeasible" else None, "ideal_credits": None}
     messages, transfers, gross = solution.objective
-    fee_b, fee_s = market.communication.buyer, market.communication.seller
     schedule = [{"buyer": names[a.buyer], "seller": names[a.seller], "token": token_name(a.token),
-                 "price": market.prices[a.buyer][a.seller], "buyer_fee": fee_b, "seller_fee": fee_s}
-                for a in solution.actions]
+                 "price": market.prices[a.buyer][a.seller]} for a in solution.actions]
     return base | {"solvable": True, "ideal_credits": gross + messages,  # every execution message is 1 credit
                    "ideal_transfers": transfers, "ideal_execution_messages": messages,
                    "ideal_gross_payments": gross, "schedule": schedule}
@@ -256,10 +268,14 @@ def _summary(g, cfg: ExperimentConfig, result, market, balances: tuple[int, ...]
 def reconcile(generated: dict[str, Any], ledger: list[dict[str, Any]], end_state: dict[str, Any]) -> dict[str, Any]:
     """Check one round against the generator's economics ("Economic validation", V0.3).
 
-    `ledger` is the broker's ordered record of the round: transfers (price and fees charged) and
-    messages (one 1-credit exploratory message per recipient). validate_economic_state replays it
-    from the trusted initial state and requires the broker's final balances, owners and progress
-    (`end_state`: credits, holdings, known) to match exactly.
+    `ledger` is the broker's ordered record of the round: offers (tax paid), sales (price and fees
+    charged) and messages. In the generator's terms an offer that led to a sale is that sale's buyer
+    execution message (its tax is charged with the sale); any other offer, and each recipient of a
+    message, is a 1-credit exploratory message. validate_economic_state replays it from the trusted
+    initial state and requires the broker's final balances, owners and progress (`end_state`:
+    credits, holdings, known) to match exactly. Charging a sale's offer tax at the sale rather than
+    when the offer was made only ever leaves the replay with more credits at earlier steps, so
+    anything the broker allowed stays affordable in the replay.
     """
     try:
         g = generator()
@@ -268,10 +284,15 @@ def reconcile(generated: dict[str, Any], ledger: list[dict[str, Any]], end_state
 
     agents, tokens = generated["agents"], generated["tokens"]
     agent, token = {n: i for i, n in enumerate(agents)}, {n: t for t, n in enumerate(tokens)}
-    counts = {"transfers": sum(x["kind"] == "transfer" for x in ledger),
-              "messages": sum(len(x["recipients"]) for x in ledger if x["kind"] == "message")}
+    counts: dict[str, int] = {}
     try:
         from hivemarket_generator.models import CommunicationEvent, Event, State, Transfer
+
+        sold = {x["offer_id"] for x in ledger if x["kind"] == "transfer"}
+        tax = {x["offer_id"]: x["tax"] for x in ledger if x["kind"] == "offer"}
+        counts = {"transfers": len(sold),
+                  "messages": sum(x["tax"] for x in ledger if x["kind"] == "offer" and x["offer_id"] not in sold)
+                  + sum(len(x["recipients"]) for x in ledger if x["kind"] == "message")}
 
         market = g.decode_market(generated["market"])
         initial = g.initial_state(market, tuple(generated["initial_balances"]))
@@ -282,9 +303,13 @@ def reconcile(generated: dict[str, Any], ledger: list[dict[str, Any]], end_state
             if x["kind"] == "message":
                 records += [CommunicationEvent(agent[x["sender"]], agent[r]) for r in x["recipients"]]
                 continue
+            if x["kind"] == "offer":  # charged with its sale, or else an exploratory message per credit of tax
+                if x["offer_id"] not in sold:
+                    records += [CommunicationEvent(agent[x["buyer"]], agent[x["seller"]])] * x["tax"]
+                continue
             t, buyer = token[x["token"]], agent[x["buyer"]]
             event = Event(len(transfers), Transfer(t, agent[x["seller"]], buyer), x["price"],
-                          x["buyer_fee"], x["seller_fee"])
+                          tax[x["offer_id"]] + x["buyer_fee"], x["seller_fee"])
             transfers.append(event)
             records.append(event)
             histories[t].append(buyer)
