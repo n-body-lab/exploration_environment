@@ -35,7 +35,10 @@ test("replaying to just after the first exchange shows the token moved", () => {
   assert.ok(s.spent >= d.cost);
   // the change since the round started is what the node shows next to the balance
   assert.strictEqual(s.credits[d.seller] - s.startCredits[d.seller], d.cost);
-  assert.strictEqual(s.credits[d.buyer] - s.startCredits[d.buyer], -d.cost);
+  // the buyer also paid for its offers (the offer tax), which the broker's snapshots include
+  const taxes = market.filter(e => e.ts <= ex.ts && e.kind === "offer_made" && e.data.buyer === d.buyer)
+                      .reduce((sum, e) => sum + (e.data.tax || 0), 0);
+  assert.strictEqual(s.credits[d.buyer] - s.startCredits[d.buyer], -d.cost - taxes);
 });
 
 test("the rogue's direct messages are detected as backchannel contacts", () => {
