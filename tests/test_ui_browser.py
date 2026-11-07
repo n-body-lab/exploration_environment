@@ -110,10 +110,14 @@ async def test_page_draws_a_finished_run(run_dir):
 
             # Each node shows its balance and the change since the round started.
             final = json.loads((run_dir / "final_state.json").read_text())["credits"]
+            start = {n: spec["credits"] for n, spec in json.loads((run_dir / "world.json").read_text())["nodes"].items()}
             texts = await page.js("[...document.querySelectorAll('#graph .g-credits')].map(t => "
                                   "[...t.childNodes].filter(n => n.nodeName !== 'title').map(n => n.textContent).join(''))")
-            assert f"{final['agent-1']} cr  +10" in texts and f"{final['agent-2']} cr  -10" in texts, texts
-            assert any(t.startswith(f"{final['agent-3']} cr") and "+" not in t and "-" not in t for t in texts), texts
+            for agent, credits in final.items():
+                change = credits - start[agent]
+                expected = f"{credits} cr" + (f"  {'+' if change > 0 else ''}{change}" if change else "")
+                assert expected in texts, (agent, expected, texts)
+            assert final["agent-1"] > start["agent-1"] and final["agent-2"] < start["agent-2"]  # a sale happened
 
             # The event stream fills its own box; the page itself doesn't scroll or grow while it redraws.
             assert await page.js("document.querySelectorAll('#log tr[data-id]').length") > 20
