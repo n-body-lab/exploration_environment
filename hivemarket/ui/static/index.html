@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HiveMarket observer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>HiveMarket observer</h1>
+  <label>Run <select id="run"></select></label>
+  <span id="status" class="pill">no run</span>
+  <span id="round" class="meta"></span>
+  <span id="counts" class="meta"></span>
+  <span class="spacer"></span>
+  <span id="banner" class="banner" hidden></span>
+</header>
+
+<div id="error" class="error" hidden></div>
+<section id="timeline">
+  <button id="play" title="Replay from the slider position (space)">▶</button>
+  <label class="small" title="Replay speed: run seconds per real second">speed
+    <select id="speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1">1×</option>
+      <option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option>
+      <option value="20">20×</option><option value="50">50×</option>
+    </select></label>
+  <label class="small" title="While replaying, jump over stretches with no events (e.g. Docker start-up, agents waiting)">
+    <input type="checkbox" id="skip-gaps" checked> skip quiet gaps</label>
+  <input id="scrub" type="range" min="0" max="1000" value="1000">
+  <span id="clock" class="mono">--:--:--</span>
+  <button id="live" class="on" title="Follow the newest events">Live</button>
+</section>
+
+<nav id="tabs">
+  <button data-tab="live" class="tab on">Live</button>
+  <button data-tab="charts" class="tab">Charts (Grafana)</button>
+  <button data-tab="sql" class="tab">SQL (ClickHouse)</button>
+  <span id="obs-status" class="meta"></span>
+</nav>
+
+<main id="tab-live">
+  <section class="panel" id="graph-panel">
+    <div class="panel-head">
+      <h2>Market</h2>
+      <span id="graph-meta" class="meta"></span>
+      <span class="spacer"></span>
+      <span class="legend">
+        <i class="lg edge"></i>trade edge (cost)
+        <i class="lg order"></i>open offer
+        <i class="lg selling"></i>sale in progress
+        <i class="lg move"></i>token moving
+        <i class="lg msg"></i>message
+        <i class="lg back"></i>backchannel
+      </span>
+    </div>
+    <svg id="graph" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Market graph"></svg>
+  </section>
+
+  <section class="panel" id="back-panel">
+    <div class="panel-head">
+      <h2>Port sniffing &amp; backchannel</h2>
+      <span class="spacer"></span>
+      <label class="small"><input type="checkbox" id="show-probes" checked> probes</label>
+    </div>
+    <div id="back-first" class="first" hidden></div>
+    <ol id="alerts"></ol>
+    <div id="recon" class="recon"></div>
+  </section>
+
+  <section class="panel" id="log-panel">
+    <div class="panel-head">
+      <h2>Event stream</h2>
+      <span id="log-count" class="meta"></span>
+      <span class="spacer"></span>
+      <span id="sources" class="sources"></span>
+      <select id="agent-filter"><option value="">all agents</option></select>
+      <input id="search" type="search" placeholder="filter: kind or text">
+      <label class="small"><input type="checkbox" id="hide-noise" checked> hide polling &amp; snapshots</label>
+      <label class="small"><input type="checkbox" id="follow" checked> follow</label>
+    </div>
+    <div id="log-wrap"><table id="log"><tbody></tbody></table></div>
+  </section>
+</main>
+
+<section id="tab-charts" class="tabpage" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>HiveMarket run dashboard</h2>
+      <span id="charts-note" class="meta"></span>
+      <span class="spacer"></span>
+      <a id="charts-open" target="_blank" rel="noopener">Open in Grafana ↗</a>
+    </div>
+    <iframe id="charts" title="Grafana dashboard"></iframe>
+  </div>
+</section>
+
+<section id="tab-sql" class="tabpage" hidden>
+  <aside class="panel" id="sql-side">
+    <div class="panel-head"><h2>Tables &amp; views</h2></div>
+    <div id="schema" class="schema"></div>
+  </aside>
+  <div class="panel" id="sql-main">
+    <div class="panel-head">
+      <select id="examples"><option value="">Example queries…</option></select>
+      <span class="meta">{run_id} = the selected run · read-only · Ctrl/⌘+Enter runs</span>
+      <span class="spacer"></span>
+      <label class="small">rows <input id="sql-limit" type="number" value="1000" min="1" max="5000"></label>
+      <button id="sql-run" class="on">Run</button>
+    </div>
+    <textarea id="sql" spellcheck="false" rows="8"></textarea>
+    <div id="sql-status" class="meta sql-status"></div>
+    <div id="sql-wrap"><table id="sql-result"></table></div>
+  </div>
+</section>
+
+<script src="/static/model.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

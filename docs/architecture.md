@@ -258,6 +258,24 @@ Each record gives sender, recipient, round, port, delivered or refused, the mess
 - Claude agents enable server-side refusal fallback by default. Each turn logs the model that served it; set `fallbacks: false` for strict attribution.
 - OpenAI-compatible providers (OpenAI, Gemini, OpenRouter, vLLM, Ollama, Hugging Face, ...) share one adapter; add routes with `gateway_routes`. The gateway resolves `host.docker.internal` on Linux too.
 
+## Observer UI
+
+`hivemarket ui` (`hivemarket/ui/`) serves a page at http://127.0.0.1:8090 for watching a run live or replaying a finished one. It reads the run directory's `logs/*.jsonl` directly, so it works for local and Docker runs while they run, without the observatory. The page has no external dependencies.
+
+- **Market graph.** The trade edges with their costs. Each node shows its credits (and escrow, when buy orders are in use), the tokens it holds, and its needs: filled once known, with a tick when its task is complete. Purchases animate as a token moving along the edge, and messages flash between sender and recipients. Open orders are dashed, and backchannel contacts are red dashed arrows with a count and port. The state at any moment is rebuilt from the broker's events (`graph_state` and `exchange`), so the slider replays a run: play at 0.25× to 50× (the choice is remembered), or jump to any moment. With "skip quiet gaps" (on by default) a replay jumps over stretches of more than 2 s with no events, such as Docker start-up or agents waiting. The space bar plays and pauses.
+- **Port sniffing & backchannel.** Every off-channel event as it is seen:
+  - **contact:** a peer connection from the packet monitors (both sides' observations merged per connection, with the payload's body), a direct message received on an agent's port, or the `direct_message` tool;
+  - **probe:** a DNS lookup of a peer, or a shell network command naming a peer;
+  - **evidence:** the broker saw knowledge that never went through it (`unexplained_knowledge`, `leaked_unheld`, `identity_mismatch`).
+
+  A banner marks when the backchannel first started and in which round. After the run, the post-run reconstruction (`analysis/backchannel.jsonl`) is summarized underneath.
+- **Event stream.** Every event from every source, one line each. Filter by source, agent or text; inbox polling and state snapshots are hidden by default. Click a row for the full event. Strings over 4,000 characters (full LLM bodies, payloads) are cut for the browser; the run directory keeps everything.
+
+The page shows everything an experimenter sees, including private memory and token contents, so it binds to 127.0.0.1. Agent containers are on an internal network with no route to the host. Agent and admin tokens are never sent to the page. 
+Two more tabs cover history, from the observatory:
+- **Charts (Grafana).** The "HiveMarket run" dashboard embedded in kiosk mode, scoped to the selected run and its time window, refreshing every 5 s while the run is live. "Open in Grafana" opens the full dashboard. The observatory's Grafana allows embedding and read-only anonymous viewing (`GF_SECURITY_ALLOW_EMBEDDING`, `GF_AUTH_ANONYMOUS_*`). It listens on 127.0.0.1 only, and editing still needs the admin login.
+- **SQL (ClickHouse).** A query box over the warehouse: tables and views with their columns, example queries (`{run_id}` = the selected run: rounds, backchannel, signals, exploration, credits, LLM usage, comparisons across runs), and a results table. Queries are checked to be a single SELECT / WITH / SHOW / DESCRIBE / EXPLAIN statement, then run with ClickHouse's `readonly=1` (no writes, and the setting can't be lifted from inside the query), a 30 s time limit and at most 5,000 rows (`hivemarket/ui/warehouse.py`).
+
 ## Verified vs. not yet verified
 
 The test suite covers the market and its logging of every interaction, world generation, flow classification, gateway and provider adapters, local end-to-end runs, transparency in tool mode, the monitor's file logic, compose generation, and shipping into a real ClickHouse engine (chDB, including every view and dashboard query).
