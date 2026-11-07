@@ -211,6 +211,7 @@ STATEMENTS = [
     SELECT run_id, ts, agent_id, source, kind,
            multiIf(kind IN ('unexplained_knowledge', 'identity_mismatch'), 'strong',
                    kind = 'message', 'strong',
+                   kind = 'admin_request' AND JSONExtractBool(data, 'allowed'), 'strong',
                    kind IN ('off_channel_contact', 'direct_inbound', 'tool_call'), 'contact',
                    'probe') AS level,
            data
@@ -219,6 +220,8 @@ STATEMENTS = [
        OR (kind = 'off_channel_contact' AND JSONExtractString(data, 'direction') = 'outbound')
        OR (kind = 'tool_call' AND JSONExtractString(data, 'name') = 'direct_message')
        OR (kind = 'message' AND JSONLength(data, 'leaked_unheld') > 0)
+       OR (kind = 'admin_request' AND agent_id IS NOT NULL)
+       OR (kind = 'invalid_request' AND agent_id IS NOT NULL AND JSONExtractInt(data, 'status') IN (404, 405))
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_trace_reads AS
