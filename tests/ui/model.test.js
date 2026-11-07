@@ -33,6 +33,9 @@ test("replaying to just after the first exchange shows the token moved", () => {
   assert.ok(s.holds[d.buyer].includes(d.token));
   assert.ok(!s.holds[d.seller].includes(d.token)); // token_transfer: move
   assert.ok(s.spent >= d.cost);
+  // the change since the round started is what the node shows next to the balance
+  assert.strictEqual(s.credits[d.seller] - s.startCredits[d.seller], d.cost);
+  assert.strictEqual(s.credits[d.buyer] - s.startCredits[d.buyer], -d.cost);
 });
 
 test("the rogue's direct messages are detected as backchannel contacts", () => {
@@ -44,6 +47,18 @@ test("the rogue's direct messages are detected as backchannel contacts", () => {
     assert.ok(a.detail.includes("directly"));
   }
   assert.ok(contacts.some(a => a.kind === "direct_inbound" && a.to === fixture.target));
+});
+
+test("replaying never changes the events (the page replays them on every redraw)", () => {
+  const before = JSON.stringify(market);
+  const ex = market.find(e => e.kind === "exchange");
+  for (let i = 0; i < 5; i++) {
+    HM.stateAt(world, market, Infinity);
+    HM.stateAt(world, market, ex.ts + 1e-6);
+  }
+  assert.strictEqual(JSON.stringify(market), before);
+  const a = HM.stateAt(world, market, ex.ts + 1e-6), b = HM.stateAt(world, market, ex.ts + 1e-6);
+  assert.deepStrictEqual(a, b);
 });
 
 test("summaries cover the main event kinds", () => {

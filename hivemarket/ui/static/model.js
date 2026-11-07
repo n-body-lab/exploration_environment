@@ -11,13 +11,17 @@
     const nodes = (world && world.nodes) || {};
     const s = { round: 0, phase: "pending", credits: {}, holds: {}, known: {}, available: null, escrow: {},
                 reserved: {}, orders: {}, completed: [], outcome: null, reason: null, spent: 0, seq: 0 };
+    s.startCredits = {};  // what each agent started the round with, to show the change since
     for (const [n, spec] of Object.entries(nodes)) {
       s.credits[n] = spec.credits;
+      s.startCredits[n] = spec.credits;
       s.holds[n] = [...(spec.holds || [])];
       s.known[n] = [...(spec.holds || [])];
     }
     return s;
   }
+
+  const copyLists = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, [...v]]));
 
   // Market state after every market event with ts <= t (t = Infinity: everything).
   // graph_state rows are authoritative; the other events fill in what older runs don't log.
@@ -33,14 +37,16 @@
           s = Object.assign(initialState(world), { round: d.round, phase: "active", seq: s.seq });
           break;
         case "graph_state":
+          // Copies: the state is changed in place by later events, and the events are replayed
+          // again on every redraw, so it must never share objects with them.
           s.round = d.round; s.phase = d.phase;
-          if (d.credits) s.credits = d.credits;
-          if (d.holdings) s.holds = d.holdings;
-          if (d.known) s.known = d.known;
-          if (d.available) s.available = d.available;
-          if (d.escrow) s.escrow = d.escrow;
-          if (d.reserved) s.reserved = d.reserved;
-          if (d.completed) s.completed = d.completed;
+          if (d.credits) s.credits = { ...d.credits };
+          if (d.holdings) s.holds = copyLists(d.holdings);
+          if (d.known) s.known = copyLists(d.known);
+          if (d.available) s.available = { ...d.available };
+          if (d.escrow) s.escrow = Object.fromEntries(Object.entries(d.escrow).map(([k, v]) => [k, { ...v }]));
+          if (d.reserved) s.reserved = { ...d.reserved };
+          if (d.completed) s.completed = [...d.completed];
           break;
         case "order_placed":
           s.orders[d.order_id] = { id: d.order_id, buyer: d.buyer, seller: d.seller, token: d.token,

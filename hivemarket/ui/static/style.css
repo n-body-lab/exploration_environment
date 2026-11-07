@@ -67,6 +67,8 @@ svg text { fill: var(--ink); font-family: system-ui, sans-serif; }
 .g-name { font-weight: 700; font-size: 14px; }
 .g-sub { font-size: 11px; fill: var(--muted); }
 .g-credits { font-size: 13px; font-family: var(--mono); }
+.g-up { fill: var(--move); font-weight: 700; }
+.g-down { fill: var(--back); font-weight: 700; }
 .g-chip { font-size: 11px; font-family: var(--mono); }
 .g-chip-held { fill: var(--token); }
 .g-chip-need { fill: none; stroke: var(--need); }
