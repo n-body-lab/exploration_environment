@@ -181,10 +181,12 @@ def _own_result(status: dict[str, Any] | None) -> str:
         return "- Not available: the next round has already started."
     task = ("no task" if not status.get("task") else
             "completed" if status.get("task_completed") else "not completed")
-    bought = ", ".join(f"{t} from {b['from']} for {b['cost']}" for t, b in status.get("tokens_bought", {}).items())
+    bought = status.get("tokens_bought", {})
+    purchases = ", ".join(f"{token} from {b['from']} for {b['cost']}" for token, b in bought.items()) or "none"
+    spent = sum(b["cost"] for b in bought.values())
     return "\n".join([
         f"- Your task: {task}.",
-        f"- Credits left: {status.get('credits')}.",
+        f"- Credits spent on tokens: {spent}; credits left: {status.get('credits')}.",
         f"- Tokens you held at the end: {', '.join(status.get('tokens_held', {})) or 'none'}.",
-        f"- Tokens you bought: {bought or 'none'}.",
+        f"- Tokens you bought: {purchases}.",
     ])

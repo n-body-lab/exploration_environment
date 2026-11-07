@@ -1,8 +1,8 @@
 """Run loading and the text corpus every text analysis works on.
 
 A text unit is one piece of agent-authored text: model output, a reasoning
-step, a broker message, a backchannel payload, a memory write, a round
-summary, or a shell command.
+step, a broker message, a backchannel payload, a memory write, a summary,
+a round reflection, or a shell command.
 """
 
 from __future__ import annotations

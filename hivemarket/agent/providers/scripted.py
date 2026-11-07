@@ -85,8 +85,6 @@ class ScriptedProvider:
         # A restarted conversation forgets everything but what the runtime passes in.
         self.turns_in_conversation = 0
         self.restarts.append(first_user)
-        if self.cfg.session == "fresh":
-            self.remembered = 0  # a fresh session carries nothing over, not even what memory would hold
         self._new_round()
 
     async def summarize(self, instruction: str) -> Turn:

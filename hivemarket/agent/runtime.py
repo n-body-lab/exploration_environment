@@ -218,6 +218,7 @@ class AgentRuntime:
         await self._await_round_start()
         if not self.market_closed:
             self.summaries.clear()
+            self.pending_checkpoint = None  # the conversation over budget is the one being dropped
             self._reset("new_round", kickoff_text(await self._status()))
 
     async def _reflect(self, notice: dict[str, Any]) -> None:
@@ -236,6 +237,12 @@ class AgentRuntime:
         except Exception as e:
             error = repr(e)
         self.telemetry.emit("round_reflection", round=notice.get("round"), text=text, usage=usage, error=error)
+        if text:
+            # Kept like a summary too, so a later budget restart still carries it.
+            self.summaries.append(f"[round {notice.get('round')}, reflection] {text[: self.cfg.context.summary_chars]}")
+            # The conversation now ends with the reflection (an assistant turn); the next request needs a user
+            # turn, or providers such as Anthropic would treat it as a prefill.
+            self.provider.add_user_text(await self._collect_events(wait=0) or "Your reflection is noted. Continue.")
         if context_tokens(usage) > self.budget and not self.pending_checkpoint:
             self.pending_checkpoint = "context_limit"
 
@@ -256,8 +263,9 @@ class AgentRuntime:
         return "\n".join(notes) or None
 
     async def _wait_for_next_round(self) -> str | None:
+        """Out of steps: wait for the next round, but stop at a round end the session has to act on."""
         notes = []
-        while not self.market_closed and self.steps_in_round > 0:
+        while not self.market_closed and self.steps_in_round > 0 and not self.round_over:
             note = await self._collect_events(wait=30)
             if note:
                 notes.append(note)
@@ -281,8 +289,10 @@ class AgentRuntime:
             if self.steps_in_round >= limit:
                 self.telemetry.emit("round_step_limit", round=self.round_no, steps=self.steps_in_round, limit=limit)
                 note = await self._wait_for_next_round()
-                if self.market_closed:
-                    return "market_closed"
+                if self.market_closed or self.round_over:  # the loop top acts on the round end (or stops)
+                    if note:
+                        self.provider.add_user_text(note)
+                    continue
                 self.provider.add_user_text(note or "A new round has started.")
                 continue
             started = time.perf_counter()
@@ -322,7 +332,7 @@ class AgentRuntime:
             if not turn.tool_calls:
                 note = await self._collect_events(wait=self.cfg.idle_wait_seconds)
                 if self.market_closed:
-                    return "market_closed"
+                    continue  # the loop top reflects on a last round still pending, then stops
                 self.provider.add_user_text(
                     note or "No new events. Continue working toward your objective, or call `wait`.")
                 continue
