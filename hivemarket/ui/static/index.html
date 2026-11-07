@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HiveMarket observer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>HiveMarket observer</h1>
+  <label>Run <select id="run"></select></label>
+  <span id="status" class="pill">no run</span>
+  <span id="round" class="meta"></span>
+  <span id="counts" class="meta"></span>
+  <span class="spacer"></span>
+  <span id="banner" class="banner" hidden></span>
+</header>
+
+<div id="error" class="error" hidden></div>
+<section id="timeline">
+  <button id="play" title="Replay from the slider position">▶</button>
+  <select id="speed" title="Replay speed"><option value="1">1×</option><option value="5" selected>5×</option><option value="20">20×</option></select>
+  <input id="scrub" type="range" min="0" max="1000" value="1000">
+  <span id="clock" class="mono">--:--:--</span>
+  <button id="live" class="on" title="Follow the newest events">Live</button>
+</section>
+
+<main>
+  <section class="panel" id="graph-panel">
+    <div class="panel-head">
+      <h2>Market</h2>
+      <span id="graph-meta" class="meta"></span>
+      <span class="spacer"></span>
+      <span class="legend">
+        <i class="lg edge"></i>trade edge (cost)
+        <i class="lg order"></i>open order
+        <i class="lg move"></i>token moving
+        <i class="lg msg"></i>message
+        <i class="lg back"></i>backchannel
+      </span>
+    </div>
+    <svg id="graph" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Market graph"></svg>
+  </section>
+
+  <section class="panel" id="back-panel">
+    <div class="panel-head">
+      <h2>Port sniffing &amp; backchannel</h2>
+      <span class="spacer"></span>
+      <label class="small"><input type="checkbox" id="show-probes" checked> probes</label>
+    </div>
+    <div id="back-first" class="first" hidden></div>
+    <ol id="alerts"></ol>
+    <div id="recon" class="recon"></div>
+  </section>
+
+  <section class="panel" id="log-panel">
+    <div class="panel-head">
+      <h2>Event stream</h2>
+      <span id="log-count" class="meta"></span>
+      <span class="spacer"></span>
+      <span id="sources" class="sources"></span>
+      <select id="agent-filter"><option value="">all agents</option></select>
+      <input id="search" type="search" placeholder="filter: kind or text">
+      <label class="small"><input type="checkbox" id="hide-noise" checked> hide polling &amp; snapshots</label>
+      <label class="small"><input type="checkbox" id="follow" checked> follow</label>
+    </div>
+    <div id="log-wrap"><table id="log"><tbody></tbody></table></div>
+  </section>
+</main>
+
+<script src="/static/model.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -29,6 +29,9 @@ export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPE
 .venv/bin/hivemarket analyze runs/<run_id>
 .venv/bin/hivemarket analyze runs/<run_id> --judge-model claude-sonnet-5-5   # + LLM judge on flagged texts
 
+# Watch a run live (or replay a finished one) in the browser: market graph, backchannel feed, event stream
+.venv/bin/hivemarket ui            # http://127.0.0.1:8090; reads runs/ directly, no observatory needed
+
 # Back up the warehouse and object storage somewhere off this disk
 .venv/bin/hivemarket backup --to /Volumes/external/hivemarket
 
