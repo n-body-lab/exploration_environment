@@ -78,6 +78,7 @@
     $("agent-filter").replaceChildren(el("option", { value: "", text: "all agents" }),
       ...S.meta.agents.map(a => el("option", { value: a.id, text: a.id })));
     loadReconstruction();
+    updateCharts();
     S.es = new EventSource(`/api/runs/${encodeURIComponent(id)}/stream`);
     S.es.addEventListener("batch", m => ingest(JSON.parse(m.data)));
     S.es.onerror = () => { status.textContent = "reconnecting…"; };
@@ -447,10 +448,110 @@
   $("scrub").addEventListener("input", () => { S.userScrolledLog = false; });
   $("follow").addEventListener("change", () => { S.userScrolledLog = false; if ($("follow").checked) $("log-wrap").scrollTop = $("log-wrap").scrollHeight; });
 
+  // ------------------------------------------------------- charts and SQL (history)
+  let tab = "live", obs = null, examplesLoaded = false, schemaLoaded = false;
+  function showTab(name) {
+    tab = name;
+    for (const b of document.querySelectorAll(".tab")) b.classList.toggle("on", b.dataset.tab === name);
+    $("tab-live").hidden = name !== "live";
+    $("tab-charts").hidden = name !== "charts";
+    $("tab-sql").hidden = name !== "sql";
+    $("timeline").hidden = name !== "live";
+    try { localStorage.setItem("hm-tab", name); } catch (_) { /* storage unavailable */ }
+    if (name === "charts") updateCharts();
+    if (name === "sql") loadSqlHelpers();
+  }
+  for (const b of document.querySelectorAll(".tab")) b.addEventListener("click", () => showTab(b.dataset.tab));
+
+  async function loadObservatory() {
+    obs = await (await fetch("/api/observatory")).json();
+    $("obs-status").textContent = `observatory: ClickHouse ${obs.clickhouse ? "up" : "down"}, Grafana ${obs.grafana ? "up" : "down"}` +
+      (obs.clickhouse && obs.grafana ? "" : " — start it with `hivemarket observatory up`");
+  }
+
+  function grafanaUrl(kiosk) {
+    if (!obs || !S.meta) return null;
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    const from = Math.floor(((S.meta.created_at || 0) - 60) * 1000);
+    const to = S.meta.status === "live" ? "now" : Math.ceil(((S.meta.last_write || Date.now() / 1000) + 60) * 1000);
+    const q = new URLSearchParams({ orgId: "1", "var-run_id": S.runId, from, to, theme: dark });
+    if (S.meta.status === "live") q.set("refresh", "5s");
+    return `${obs.grafana_url}/d/${obs.dashboard_uid}/?${q}${kiosk ? "&kiosk" : ""}`;
+  }
+  let chartsFor = null;
+  function updateCharts() {
+    if (tab !== "charts" || !obs) return;
+    const url = grafanaUrl(true);
+    $("charts-open").href = grafanaUrl(false) || "#";
+    if (!obs.grafana) { $("charts-note").textContent = "Grafana is not reachable."; return; }
+    $("charts-note").textContent = `run ${S.runId}` + (S.meta && S.meta.status === "live" ? " · refreshing every 5s" : "");
+    if (url && chartsFor !== url) { $("charts").src = url; chartsFor = url; }
+  }
+
+  async function loadSqlHelpers() {
+    if (!examplesLoaded) {
+      examplesLoaded = true;
+      const ex = await (await fetch("/api/sql/examples")).json();
+      $("examples").append(...ex.map((x, i) => el("option", { value: i, text: x.title })));
+      $("examples").addEventListener("change", e => {
+        if (e.target.value === "") return;
+        $("sql").value = ex[+e.target.value].sql;
+        e.target.value = "";
+        runSql();
+      });
+      if (!$("sql").value) $("sql").value = ex[0].sql;
+    }
+    if (!schemaLoaded) {
+      const r = await fetch("/api/sql/schema");
+      const body = await r.json();
+      if (!r.ok) { $("schema").replaceChildren(el("div", { class: "empty", text: body.error })); return; }
+      schemaLoaded = true;
+      $("schema").replaceChildren(...body.map(t => {
+        const d = el("details", {}, el("summary", { text: t.table }),
+          ...t.columns.map(c => {
+            const div = el("div", { class: "col", text: `${c.name}  ${c.type}`, title: "Insert into the query" });
+            div.addEventListener("click", () => insertText(c.name));
+            return div;
+          }));
+        d.querySelector("summary").addEventListener("dblclick", () => insertText(`hivemarket.${t.table}`));
+        return d;
+      }));
+    }
+  }
+  function insertText(text) {
+    const ta = $("sql"), a = ta.selectionStart, b = ta.selectionEnd;
+    ta.value = ta.value.slice(0, a) + text + ta.value.slice(b);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = a + text.length;
+  }
+  async function runSql() {
+    const status = $("sql-status");
+    const sql = $("sql").value.replaceAll("{run_id}", `'${(S.runId || "").replaceAll("'", "")}'`);
+    status.className = "meta sql-status"; status.textContent = "running…";
+    const r = await fetch("/api/sql", { method: "POST", headers: { "content-type": "application/json" },
+                                        body: JSON.stringify({ sql, limit: +$("sql-limit").value || 1000 }) });
+    const body = await r.json();
+    if (!r.ok) { status.className = "meta sql-status err"; status.textContent = body.error; $("sql-result").replaceChildren(); return; }
+    status.textContent = `${body.rows_returned} rows${body.truncated ? " (truncated)" : ""}` +
+      (body.elapsed_s != null ? ` · ${(body.elapsed_s * 1000).toFixed(1)} ms` : "") +
+      (body.rows_read != null ? ` · ${body.rows_read} rows read` : "");
+    const cell = v => (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v ?? ""));
+    $("sql-result").replaceChildren(
+      el("thead", {}, el("tr", {}, ...body.columns.map(c => el("th", {}, c.name + " ", el("small", { text: c.type }))))),
+      el("tbody", {}, ...body.rows.map(row => el("tr", {}, ...row.map(v => el("td", { text: cell(v) }))))));
+  }
+  $("sql-run").addEventListener("click", runSql);
+  $("sql").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runSql(); } });
+
   for (const id of ["agent-filter", "hide-noise", "follow", "show-probes"]) $(id).addEventListener("change", () => { S.dirty = true; });
   $("search").addEventListener("input", () => { S.dirty = true; });
   $("run").addEventListener("change", e => openRun(e.target.value));
   loadRuns(decodeURIComponent(location.hash.slice(1)));
+  loadObservatory().then(() => {
+    let saved = null;
+    try { saved = localStorage.getItem("hm-tab"); } catch (_) { /* storage unavailable */ }
+    if (saved && saved !== "live") showTab(saved);
+  });
+  setInterval(loadObservatory, 30000);
   setInterval(() => loadRuns(), 10000); // new runs appear in the list; status changes show up
   requestAnimationFrame(frame);
 })();
