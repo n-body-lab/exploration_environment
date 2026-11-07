@@ -28,7 +28,7 @@ def world(graph=GRAPH, comm=2, rounds=3, round_seconds=60, pause=0, stop_on_pass
         "edges": [{"from": s, "to": d, "cost": c} for (s, d), c in g.edge_costs().items()],
         "communication_cost": comm, "seed": 1,
         "rounds": {"count": rounds, "round_seconds": round_seconds, "pause_seconds": pause, "stop_on_pass": stop_on_pass},
-        "ideal": ideal_cost(g, comm),
+        "ideal": ideal_cost(g, comm, token_transfer),
         "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3,
                   "token_transfer": token_transfer},
     }
@@ -243,3 +243,29 @@ async def test_passing_a_token_back_is_allowed(tmp_path):
     assert b.holds["a"] == {"A1", "A2"} and "A1" not in b.holds["b"]
     kinds = [e["kind"] for e in read_jsonl(tmp_path / "m.jsonl")]
     assert "buy_failed" not in kinds and "unexplained_knowledge" not in kinds
+
+
+@pytest.mark.parametrize("edges", [
+    [("x", "y", 1), ("y", "x", 1), ("x", "z", 1)],            # z only reachable back through x: a revisit
+    [("x", "y", 5), ("x", "z", 9), ("y", "z", 1), ("z", "y", 4)],  # a plain chain
+])
+async def test_playing_the_ideal_plan_passes_at_exactly_ideal_cost(tmp_path, edges):
+    """Guards the planner and the broker against drifting apart (issue #11)."""
+    g = {"nodes": {"x": {"credits": 50, "holds": ["A"], "needs": []},
+                   "y": {"credits": 50, "holds": [], "needs": ["A"]},
+                   "z": {"credits": 50, "holds": [], "needs": ["A"]}},
+         "edges": [{"from": a, "to": b, "cost": c} for a, b, c in edges]}
+    w = world(g, comm=2, rounds=1, token_transfer="move")
+    assert w["ideal"]["solvable"]
+    b = Broker(w, EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    for tok, plan in w["ideal"]["per_token"].items():
+        for x in plan["exchanges"]:
+            if x["relay"]:  # the relay has to be asked to pass the token on: one message
+                await b.send_message(x["from"], x["to"], f"please buy {tok} from me and pass it on")
+            await b.buy(x["to"], tok, x["from"])
+    for n in ("y", "z"):
+        assert (await b.submit(n, answer(b, n)))["correct"]
+    res = b.results[0]
+    assert res["outcome"] == "pass" and res["credits_spent"] == w["ideal"]["ideal_credits"]
+    assert res["excess_over_ideal"] == 0
