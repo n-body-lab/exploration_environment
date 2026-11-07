@@ -48,6 +48,7 @@ main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); 
 .legend { color: var(--muted); font-size: 11px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .lg { display: inline-block; width: 18px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 3px; }
 .lg.edge { border-color: var(--edge); } .lg.order { border-color: var(--order); border-top-style: dashed; }
+.lg.selling { border-color: var(--order); border-top-style: dashed; border-top-width: 4px; }
 .lg.move { border-color: var(--move); border-top-width: 4px; } .lg.msg { border-color: var(--msg); border-top-style: dotted; }
 .lg.back { border-color: var(--back); border-top-style: dashed; border-top-width: 3px; }
 
@@ -56,6 +57,7 @@ svg text { fill: var(--ink); font-family: system-ui, sans-serif; }
 .g-edge-label, .g-back-label { paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
 .g-edge-label { font-size: 11px; fill: var(--muted); }
 .g-order { stroke: var(--order); stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+.g-order.g-selling { stroke-width: 4; stroke-dasharray: 10 3; }
 .g-move { stroke: var(--move); stroke-width: 4; fill: none; }
 .g-msg { stroke: var(--msg); stroke-width: 2; stroke-dasharray: 2 4; fill: none; }
 .g-back { stroke: var(--back); stroke-width: 2.5; stroke-dasharray: 8 5; fill: none; }

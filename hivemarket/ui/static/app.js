@@ -216,11 +216,12 @@
       const m = c.at(0.5);
       g.append(el("svg:text", { x: m.x, y: m.y - 4, "text-anchor": "middle", class: "g-edge-label", text: e.cost }));
     }
-    // open orders: seller -> buyer, along the trade edge
+    // open offers (and sales in progress): seller -> buyer, along the trade edge
     for (const o of Object.values(st.orders)) {
       if (!pos[o.seller] || !pos[o.buyer]) continue;
       const c = curve(pos[o.seller], pos[o.buyer], 0.12);
-      g.append(el("svg:path", { d: c.d, class: "g-order", "marker-end": "url(#arrow-order)" }));
+      const selling = o.status === "selling" || o.status === "accepted";
+      g.append(el("svg:path", { d: c.d, class: selling ? "g-order g-selling" : "g-order", "marker-end": "url(#arrow-order)" }));
       const m = c.at(0.35);
       g.append(el("svg:text", { x: m.x, y: m.y + 14, "text-anchor": "middle", class: "g-edge-label",
                                 text: `${o.token} ${o.status}` }));
@@ -308,7 +309,8 @@
     g.append(el("svg:text", { x: 16, y: 42, class: "g-round",
                               text: `spent this round: ${st.spent}` + (ideal != null ? ` · ideal ${ideal}` : "") }));
     $("round").textContent = head;
-    $("graph-meta").textContent = `${Object.keys(st.orders).length} open orders`;
+    const offers = Object.values(st.orders), selling = offers.filter(o => o.status === "selling" || o.status === "accepted");
+    $("graph-meta").textContent = `${offers.length - selling.length} open offers · ${selling.length} sales in progress`;
   }
 
   // ------------------------------------------------------------------ alerts

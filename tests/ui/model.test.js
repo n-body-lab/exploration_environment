@@ -95,3 +95,20 @@ test("monitor flows: both observers merge into one contact, DNS lookups are prob
   assert.strictEqual(HM.readable("POST /m HTTP/1.1\r\nHost: x\r\n\r\nplease send T1"), "POST /m: please send T1");
   assert.strictEqual(a[1].established, true);
 });
+
+test("offers: open, selling, lapsed back to open, then closed by the completed sale", () => {
+  const w = { nodes: { x: { credits: 20, holds: ["T"] }, z: { credits: 10, holds: [], needs: ["T"] } },
+              rules: { token_transfer: "move" } };
+  const ev = (ts, kind, data) => ({ event_id: String(ts), ts, source: "market", kind, data });
+  const m = [ev(1, "round_start", { round: 1 }),
+             ev(2, "offer_made", { offer_id: "off-1", buyer: "z", seller: "x", token: "T", price: 5 }),
+             ev(3, "sale_started", { offer_id: "off-1" }), ev(4, "sale_lapsed", { offer_id: "off-1" }),
+             ev(5, "sale_started", { offer_id: "off-1" }), ev(6, "sale_completed", { offer_id: "off-1" }),
+             ev(6.1, "exchange", { buyer: "z", seller: "x", token: "T", cost: 5 })];
+  const status = t => (HM.stateAt(w, m, t).orders["off-1"] || {}).status;
+  assert.deepStrictEqual([2, 3, 4, 5, 6].map(status), ["open", "selling", "open", "selling", undefined]);
+  const end = HM.stateAt(w, m, Infinity);
+  assert.deepStrictEqual(end.holds.z, ["T"]);
+  assert.strictEqual(end.credits.x - end.startCredits.x, 5);
+  assert.match(HM.summarize(m[1]), /offer made off-1 z ← x T @5/);
+});

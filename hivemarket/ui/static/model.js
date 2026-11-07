@@ -3,7 +3,9 @@
 (function (root) {
   "use strict";
 
-  const OPEN_ORDER_END = new Set(["order_committed", "order_declined", "order_cancelled", "order_expired",
+  // Events that close an open offer (or, in runs from before offers, a buy order).
+  const OPEN_ORDER_END = new Set(["sale_completed", "offer_withdrawn", "offer_cleared",
+                                  "order_committed", "order_declined", "order_cancelled", "order_expired",
                                   "order_aborted"]);
   const NET_TOOLS = /\b(nc|ncat|netcat|curl|wget|nmap|socat|telnet|ssh|ping|dig|nslookup|getent|host)\b|\/dev\/tcp|socket/;
 
@@ -48,6 +50,16 @@
           if (d.reserved) s.reserved = { ...d.reserved };
           if (d.completed) s.completed = [...d.completed];
           break;
+        case "offer_made":
+          s.orders[d.offer_id] = { id: d.offer_id, buyer: d.buyer, seller: d.seller, token: d.token,
+                                   price: d.price, status: "open", ts: e.ts };
+          break;
+        case "sale_started":
+          if (s.orders[d.offer_id]) s.orders[d.offer_id].status = "selling";
+          break;
+        case "sale_lapsed":
+          if (s.orders[d.offer_id]) s.orders[d.offer_id].status = "open";
+          break;
         case "order_placed":
           s.orders[d.order_id] = { id: d.order_id, buyer: d.buyer, seller: d.seller, token: d.token,
                                    price: d.price, status: "pending", ts: e.ts };
@@ -79,7 +91,7 @@
           s.phase = "over";
           break;
         default:
-          if (OPEN_ORDER_END.has(e.kind)) delete s.orders[d.order_id];
+          if (OPEN_ORDER_END.has(e.kind)) delete s.orders[d.offer_id || d.order_id];
       }
     }
     return s;
@@ -196,6 +208,10 @@
       case "direct_inbound": return `direct connection from ${d.src_ip}:${d.src_port}: ${short(d.body)}`;
       case "llm_call": return `${d.route || ""} ${d.model || ""} ${d.status || ""}`.trim();
       default:
+        if (e.kind && (e.kind.startsWith("offer_") || e.kind.startsWith("sale_"))) {
+          return `${e.kind.replace("_", " ")} ${d.offer_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +
+                 (d.price != null ? ` @${d.price}` : "") + (d.reason ? ` (${d.reason})` : "");
+        }
         if (e.kind && e.kind.startsWith("order_")) {
           return `${e.kind.slice(6)} ${d.order_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +
                  (d.price != null ? ` @${d.price}` : "") + (d.reason ? ` (${d.reason})` : "");
