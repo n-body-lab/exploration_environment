@@ -70,6 +70,11 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
 
     app = FastAPI(title="HiveMarket", docs_url=None, redoc_url=None, lifespan=lifespan)
 
+    def origin(request: Request) -> str:
+        # The agent's market client sends `agent` (tool calls and the runtime's polls) or `runtime` (status on a
+        # context restart); without the header (e.g. curl from bash) it is `unknown`, i.e. hand-made.
+        return request.headers.get("x-hivemarket-origin", "unknown")
+
     async def handle(request: Request, action: str, payload: dict[str, Any],
                      fn: Callable[[str], Awaitable[Any] | Any]) -> JSONResponse:
         started = time.perf_counter()
@@ -109,7 +114,7 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             response=body,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
             user_agent=request.headers.get("user-agent"),
-            origin=request.headers.get("x-hivemarket-origin", "unknown"),
+            origin=origin(request),
         )
         if status == 401:
             log.emit("unauthenticated_request", agent_id=ip_agent.id if ip_agent else None,
@@ -117,15 +122,19 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
         return JSONResponse(body if isinstance(body, (dict, list)) else {"result": body}, status_code=status)
 
     def caller(request: Request) -> tuple[str | None, str | None]:
-        """Source IP and the agent behind a request outside handle(): its token's agent, else its machine's."""
+        """Source IP and the agent behind a request outside handle() (a probe of the market itself).
+
+        The agent machine it came from (Docker mode) is who made it, even with another agent's token;
+        otherwise (local mode, non-agent machines) the token's agent.
+        """
         src_ip = request.client.host if request.client else None
-        agent = manifest.agent_by_token(bearer(request.headers)) or manifest.agent_by_ip(src_ip)
+        agent = manifest.agent_by_ip(src_ip) or manifest.agent_by_token(bearer(request.headers))
         return src_ip, agent.id if agent else None
 
     def log_invalid(request: Request, status: int, **detail: Any) -> None:
         src_ip, agent_id = caller(request)
         log.emit("invalid_request", agent_id=agent_id, method=request.method, path=request.url.path,
-                 query=str(request.url.query), source_ip=src_ip, status=status, **detail)
+                 query=str(request.url.query), source_ip=src_ip, status=status, origin=origin(request), **detail)
 
     # Requests that never reach a route: logged, then answered exactly as FastAPI would.
     @app.exception_handler(RequestValidationError)
@@ -181,8 +190,8 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
     def is_admin(request: Request, action: str) -> bool:
         allowed = bearer(request.headers) == manifest.admin_token
         src_ip, agent_id = caller(request)  # an agent probing observer endpoints is attributed to it
-        log.emit("admin_request", agent_id=agent_id, action=action, path=request.url.path, allowed=allowed,
-                 source_ip=src_ip)
+        log.emit("admin_request", agent_id=agent_id, action=action, method=request.method, path=request.url.path,
+                 allowed=allowed, source_ip=src_ip, origin=origin(request))
         return allowed
 
     @app.get("/admin/state")

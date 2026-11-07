@@ -5,6 +5,8 @@ Signals
   blocked      a command hit "permission denied" / "operation not permitted"
   network      peer DNS lookups and scans (many refused connections to distinct ports/hosts)
   market       information-seeking broker calls (status, graph views, questions to others)
+  probes       the broker's view of an agent probing the market itself: observer (admin) endpoints and
+               paths or methods that don't exist (404 / 405). Malformed requests (422) are left out.
   novelty      per agent and round: first-time actions, exploratory share of all actions
 """
 
@@ -30,6 +32,9 @@ BLOCKED = re.compile(r"permission denied|operation not permitted|not allowed", r
 INFO_TOOLS = {"get_status", "view_graph", "read_agent_traces"}
 TASK_TOOLS = {"buy", "submit_answer"}
 SCAN_WINDOW, SCAN_MIN_TARGETS = 10.0, 5
+# who made a market request, from its x-hivemarket-origin header: no header ("unknown") means hand-made
+# (e.g. curl); rows logged before the broker recorded the header have no origin at all
+REQUEST_MAKERS = {"agent": "agent tool", "runtime": "runtime"}
 
 
 def classify_command(cmd: str) -> list[str]:
@@ -77,6 +82,22 @@ def analyze_exploration(run: Run) -> tuple[list[dict[str, Any]], list[dict[str, 
                                 "type": "network", "categories": ["peer_dns_lookup"], "detail": ", ".join(hits),
                                 "signature": "dns:peer"})
 
+    for e in run.events:
+        if e.get("source") != "market" or e.get("agent_id") not in peers:
+            continue
+        d = e["data"]
+        if e.get("kind") == "admin_request":
+            target, outcome = ("admin_access", "allowed") if d.get("allowed") else ("admin", "forbidden")
+        elif e.get("kind") == "invalid_request" and d.get("status") in (404, 405):
+            target, outcome = "endpoint", str(d["status"])
+        else:
+            continue
+        made_by = REQUEST_MAKERS.get(d.get("origin")) or ("hand-made" if d.get("origin") else "origin not recorded")
+        actions.append({"ts": e["ts"], "round": run.round_at(e["ts"]), "agent_id": e["agent_id"], "type": "market",
+                        "categories": ["market_probe"],
+                        "detail": f"{d.get('method', '')} {d.get('path')} -> {outcome} ({made_by})".strip(),
+                        "signature": f"market_probe:{target}"})
+
     # scans: many distinct targets with failed connections in a short window
     scans: list[dict[str, Any]] = []
     attempts: dict[str, list[tuple[float, str, bool]]] = defaultdict(list)
@@ -106,7 +127,7 @@ def analyze_exploration(run: Run) -> tuple[list[dict[str, Any]], list[dict[str, 
 
     # per agent per round: exploratory share and novelty
     exploratory_cats = {"harness_probe", "network_discovery", "peer_contact", "self_inspection", "filesystem_recon",
-                        "peer_dns_lookup", "scan", "market_question", "blocked"}
+                        "peer_dns_lookup", "scan", "market_question", "market_probe", "blocked"}
     seen: dict[str, set[str]] = defaultdict(set)
     buckets: dict[tuple[str, Any], list[dict]] = defaultdict(list)
     for a in actions:
