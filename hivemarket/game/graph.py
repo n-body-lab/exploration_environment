@@ -306,9 +306,14 @@ def _move_walks(costs: dict[tuple[str, str], int], comm: int, holders: list[str]
 
 
 def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
-               token_transfer: Literal["move", "copy"] = "move") -> dict[str, Any]:
+               token_transfer: Literal["move", "copy"] = "move", transfer_tax: int = 0) -> dict[str, Any]:
+    """`communication_cost`: what asking a relay to pass a token on costs (one message).
+    `transfer_tax`: what every transfer costs on top of its price (the offer tax: each purchase
+    needs at least one offer). With offers, a relay is asked by the offer itself, so runs use
+    communication_cost=0 and transfer_tax=offer_tax."""
     nodes = list(graph.nodes)
-    costs = graph.edge_costs()
+    edge_price = graph.edge_costs()
+    costs = {k: c + transfer_tax for k, c in edge_price.items()}  # what a transfer costs in all
     tokens = sorted({t for n in graph.nodes.values() for t in n.needs})
     per_token: dict[str, Any] = {}
     unreachable: list[dict[str, str]] = []
@@ -336,7 +341,8 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
             per_token[tok] = {
                 "credits": int(cost),
                 # in walk order; an edge can appear more than once when a walk revisits a node
-                "exchanges": [{"from": u, "to": v, "cost": costs[(u, v)], "relay": is_relay} for u, v, is_relay in hops],
+                "exchanges": [{"from": u, "to": v, "cost": edge_price[(u, v)], "tax": transfer_tax, "relay": is_relay}
+                              for u, v, is_relay in hops],
                 "walks": [[w["holder"]] + [v for _, v, _ in w["hops"]] for w in walks],
                 "relays": sorted(set(relay_hops)),
                 "relay_messages": len(relay_hops),
@@ -348,7 +354,8 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
             relays = sorted({v for _, v in tree if v not in needers and v not in holders})
             per_token[tok] = {
                 "credits": int(cost),
-                "exchanges": [{"from": u, "to": v, "cost": costs[(u, v)]} for u, v in sorted(tree)],
+                "exchanges": [{"from": u, "to": v, "cost": edge_price[(u, v)], "tax": transfer_tax}
+                              for u, v in sorted(tree)],
                 "relays": relays,
                 "relay_messages": len(relays),
             }
@@ -358,7 +365,7 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     spend: dict[str, int] = {}
     for info in per_token.values():
         for x in info["exchanges"]:
-            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"]
+            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + x.get("tax", 0)
     shortfalls = {n: c - graph.nodes[n].credits for n, c in spend.items() if c > graph.nodes[n].credits}
     return {
         "solvable": not unreachable,
@@ -382,13 +389,15 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
         "communication_cost": cfg.communication_cost,
         "seed": cfg.seed,
         "rounds": cfg.rounds.model_dump() | {"round_seconds": cfg.round_seconds},
-        "ideal": ideal_cost(graph, cfg.communication_cost, cfg.market.token_transfer),
+        # Offers are how demand travels (a relay is asked by an offer), so no separate relay message.
+        "ideal": ideal_cost(graph, 0, cfg.market.token_transfer, transfer_tax=cfg.market.offer_tax),
         "impossible": impossible,  # generator ground truth; not exposed to agents
         "rules": {
             "allow_broadcast": cfg.market.allow_broadcast,
             "graph_visibility": cfg.market.graph_visibility,
             "max_submissions": cfg.market.max_submissions,
             "token_transfer": cfg.market.token_transfer,
-            "order_timeout_seconds": cfg.market.order_timeout_seconds,
+            "offer_tax": cfg.market.offer_tax,
+            "sale_timeout_seconds": cfg.market.sale_timeout_seconds,
         },
     }

@@ -197,9 +197,11 @@ class MarketConfig(BaseModel):
     # move: a sale transfers the token, so the seller no longer holds (or can resell) it but still
     # knows its content. copy: the seller keeps a copy (non-rival tokens; the original behaviour).
     token_transfer: Literal["move", "copy"] = "move"
-    # Buy orders (two-phase commit): how long a seller has to answer an order, and then how
-    # long the buyer has to commit an accepted one, before the broker expires it.
-    order_timeout_seconds: float = Field(90.0, gt=0)
+    # Trading (see market/state.py): an OFFER signals demand and costs `offer_tax` credits, burned
+    # and never refunded. Once a seller SELLs on an offer, the buyer has `sale_timeout_seconds` to
+    # BUY before the reservation is released and the offer goes back to open.
+    offer_tax: int = Field(1, ge=0)
+    sale_timeout_seconds: float = Field(90.0, gt=0)
 
 
 class MemoryConfig(BaseModel):
