@@ -2,9 +2,12 @@
 
 Runs the graph game over one or more rounds and keeps the ledger.
 
-  exchange   buyer pays the edge cost (seller -> buyer) to the seller and gets a copy of
-             the token's content. Tokens are non-rival: anything a node holds, including
-             tokens it bought, it can sell along its outgoing edges (relays).
+  exchange   buyer pays the edge cost (seller -> buyer) to the seller and gets the token
+             and its content. With token_transfer=move (default) the token changes hands:
+             the seller no longer holds it and can't resell it, but still knows its content.
+             With token_transfer=copy the seller keeps a copy (non-rival tokens). Anything a
+             node holds, including tokens it bought, it can sell along its outgoing edges
+             (relays).
   message    the sender burns `communication_cost` credits per recipient.
   submit     a node with needs submits the contents of its needed tokens, in order,
              joined with '-'. The round passes when every such node has submitted
@@ -62,6 +65,7 @@ class Broker:
         self.visibility = rules.get("graph_visibility", "neighbors")
         self.allow_broadcast = rules.get("allow_broadcast", True)
         self.max_submissions = rules.get("max_submissions", 3)
+        self.token_transfer = rules.get("token_transfer", "move")
         self.ideal = world.get("ideal", {})
         self.agents = list(self.spec)
         self.solvers = [n for n, s in self.spec.items() if s["needs"]]
@@ -80,6 +84,9 @@ class Broker:
     def _reset_round_state(self) -> None:
         self.credits = {n: int(s["credits"]) for n, s in self.spec.items()}
         self.holds = {n: set(s["holds"]) for n, s in self.spec.items()}
+        # Tokens whose content a node has legitimately seen (held at start or bought). Unlike
+        # holds, this never shrinks within a round: selling a token doesn't erase what you know.
+        self.known = {n: set(s["holds"]) for n, s in self.spec.items()}
         self.acquired: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in self.spec}
         self.submissions = {n: 0 for n in self.spec}
         self.completed: dict[str, float] = {}
@@ -266,20 +273,24 @@ class Broker:
             "seconds_left_in_round": None if remaining is None else round(remaining, 1),
             "credits": self.credits[agent_id],
             "tokens_held": {t: self.contents.get(t) for t in sorted(self.holds[agent_id])},
+            # Everything this agent has legitimately learned this round, including tokens it has sold.
+            "tokens_known": {t: self.contents.get(t) for t in sorted(self.known[agent_id])},
             "tokens_bought": {t: {"from": a["from"], "cost": a["cost"]} for t, a in self.acquired[agent_id].items()},
             "task": self._task(agent_id),
             "task_completed": agent_id in self.completed,
             "submissions_used": self.submissions[agent_id],
             "submissions_allowed": self.max_submissions,
             "communication_cost": self.comm_cost,
+            "token_transfer": self.token_transfer,
             "participants": self.agents,
         }
 
     def graph_view(self, agent_id: str) -> dict[str, Any]:
         if agent_id not in self.spec:
             raise MarketError(404, "unknown_agent", f"Unknown agent '{agent_id}'.")
-        sellers = [{"node": s, "cost": c, "holds": sorted(self.holds[s])}
-                   for (s, d), c in sorted(self.costs.items()) if d == agent_id]
+        # Agents see prices and who they can trade with, never what other nodes hold.
+        # Full holdings stay available to observers through GET /admin/state.
+        sellers = [{"node": s, "cost": c} for (s, d), c in sorted(self.costs.items()) if d == agent_id]
         buyers = [{"node": d, "cost": c} for (s, d), c in sorted(self.costs.items()) if s == agent_id]
         view: dict[str, Any] = {
             "you_can_buy_from": sellers,
@@ -330,15 +341,20 @@ class Broker:
         self.credits[agent_id] -= cost
         self.credits[seller] += cost
         self.holds[agent_id].add(token)
+        self.known[agent_id].add(token)
+        moved = self.token_transfer == "move"
+        if moved:
+            self.holds[seller].discard(token)
         self.acquired[agent_id][token] = {"from": seller, "cost": cost, "ts": now()}
         relay = token not in self.spec[seller]["holds"]  # seller had bought it
         record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": token,
-                  "cost": cost, "relay": relay}
+                  "cost": cost, "relay": relay, "moved": moved}
         self.exchanges.append(record)
         self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=token)
         self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
                       seller_credits=self.credits[seller])
-        await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.",
+        note = " You no longer hold it, but you still know its content." if moved else ""
+        await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.{note}",
                             event="sale", token=token, buyer=agent_id, cost=cost)
         await self._check_progress()
         return {"ok": True, "token": token, "content": self.contents[token], "cost": cost,
@@ -371,7 +387,9 @@ class Broker:
             self._record_balances("message", {agent_id: -cost}, sender=agent_id, recipients=recipients)
         self.log.emit("message", agent_id=agent_id, **record, credits=self.credits[agent_id],
                       token_contents_included=leaked,
-                      leaked_unheld=[t for t in leaked if t not in self.holds[agent_id]])
+                      # contents the sender never obtained through the broker (off-channel knowledge);
+                      # the name is kept for the warehouse views and report
+                      leaked_unheld=[t for t in leaked if t not in self.known[agent_id]])
         await self._publish(to, body, sender=agent_id, type_="message")
         await self._check_progress()
         return {"ok": True, "delivered_to": recipients, "cost": cost, "credits": self.credits[agent_id]}
@@ -389,7 +407,7 @@ class Broker:
         answer = answer.strip()
         correct = answer == "-".join(self.contents[t] for t in task["needs"])
         used = self._contents_in(answer)
-        unexplained = [t for t in used if t not in self.holds[agent_id]]
+        unexplained = [t for t in used if t not in self.known[agent_id]]
         if correct:
             self.completed[agent_id] = now()
         self.log.emit("submission", agent_id=agent_id, round=self.round_no, answer=answer, correct=correct,
@@ -421,5 +439,6 @@ class Broker:
             "results": self.results,
             "credits": dict(self.credits),
             "holds": {n: sorted(h) for n, h in self.holds.items()},
+            "known": {n: sorted(k) for n, k in self.known.items()},
             "ideal": self.ideal,
         }

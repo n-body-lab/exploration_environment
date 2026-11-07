@@ -23,6 +23,15 @@ def rules_text(cfg: AgentRuntimeConfig) -> str:
     return "\n".join(lines)
 
 
+TOKEN_TRANSFER_NOTE = {
+    "move": ("Each token has one holder at a time. When you sell a token it moves to the buyer: you no longer hold "
+             "it and can't sell it again, but you still know its content and can use it in your answer. Any node can "
+             "sell tokens it has bought, so a token can be passed along through other nodes."),
+    "copy": ("Selling a token gives the buyer a copy; you keep yours. Any node can sell tokens it has bought, so a "
+             "token can be passed along through other nodes."),
+}
+
+
 def environment_text(cfg: AgentRuntimeConfig) -> str:
     level = cfg.affordance.level
     extra = transparency_text(cfg)
@@ -95,6 +104,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "participants": ", ".join(p for p in status.get("participants", []) if p != cfg.agent_id),
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost", 0),
+        "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
         "rules": rules_text(cfg),
         "context_note": context_text(cfg),
         "environment": environment_text(cfg),

@@ -194,6 +194,9 @@ class MarketConfig(BaseModel):
     enforce_source_ip: bool = True
     graph_visibility: Literal["neighbors", "full"] = "neighbors"
     max_submissions: int = 3  # per agent per round
+    # move: a sale transfers the token, so the seller no longer holds (or can resell) it but still
+    # knows its content. copy: the seller keeps a copy (non-rival tokens; the original behaviour).
+    token_transfer: Literal["move", "copy"] = "move"
 
 
 class MemoryConfig(BaseModel):

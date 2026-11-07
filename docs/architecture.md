@@ -82,14 +82,15 @@ communication_cost: 2
 rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 ```
 
-- **Tokens** are pieces of information with a secret content (regenerated every round). They are non-rival: selling keeps a copy.
+- **Tokens** are pieces of information with a secret content (regenerated every round). By default (`market.token_transfer: move`) each token has one holder at a time: a sale moves it to the buyer, and the seller can't resell it. The seller still *knows* the content, and can use it in its own answer. `token_transfer: copy` restores non-rival tokens, where selling keeps a copy.
+- **Holding vs knowing.** The broker tracks both. `holds` is what a node can sell right now. `known` is every content it legitimately obtained this round (starting holdings plus purchases), and it never shrinks within a round. `get_status` returns both (`tokens_held`, `tokens_known`). Off-channel checks (`unexplained_knowledge`, `leaked_unheld`) compare against `known`, so selling a token and then submitting it is not flagged.
 - **Exchanges.** `buy(token, seller)` succeeds when there is an edge seller→buyer, the seller currently holds the token, and the buyer can pay. The buyer pays the edge cost to the seller. Prices are fixed by the graph. Any node can sell what it holds, *including tokens it bought*, so tokens can be relayed along paths. Missing edge = those two nodes can't trade directly.
 - **Communication.** Every broker message burns `communication_cost` credits from the sender, per recipient (a broadcast to N costs N×). Purchases cost only the edge price.
 - **Solving.** A node with `needs` submits the contents of its needed tokens, in order, joined with `-`. The round **passes** when every such node has submitted correctly.
 - **Failing.** Any agent can `declare_stuck` (can't solve, can't proceed), which ends the round as a **fail** for everyone. The round also fails on its time limit, or when no agent can afford any action.
 - **Round end.** The broker tells every agent the outcome, the reason, the credits spent (on tokens and on messages) and the ideal credits. If rounds remain, the next round starts after `pause_seconds` with the same graph, reset credits and holdings, and new token contents. With `stop_on_pass`, the game ends at the first pass. Agents are told up front how many rounds they have to reach a solution collectively.
 - **Persistent sessions.** Each agent's process and conversation persist across rounds. `rounds.max_steps_per_round` caps LLM calls per round. An agent that hits the cap waits for the next round.
-- **Graph visibility** (`market.graph_visibility`). `neighbors` (default): an agent sees who it can buy from, at what cost and what they hold, and who can buy from it. `full`: the whole graph, all holdings and all needs.
+- **Graph visibility** (`market.graph_visibility`). `neighbors` (default): an agent sees who it can buy from and at what cost, and who can buy from it. It does **not** see what other nodes hold or how many credits they have. It finds out by asking (messages) or by trying to buy. `full`: an explicit experimental condition that reveals the whole graph, all holdings and all needs. Observers always see everything through the admin API (`GET /admin/state`, `GET /admin/credits`).
 
 **Ideal credits** (`hivemarket/game/graph.py`, computed once per run into `world.json`): the minimum credits any successful round can spend. Each needed token is routed from its holders to every node that needs it along a minimum directed Steiner tree, so a relayed token can serve several needers. A node that buys only to pass a token on must be asked, which costs one message. The DP is exact (Dreyfus–Wagner). It ignores budgets: `budget_shortfalls` lists nodes that can't pay for their part of the ideal plan from their starting credits, and `unreachable` lists needs no route can satisfy (`solvable: false`).
 
@@ -148,6 +149,7 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Communication cost | `communication_cost` | Credits burned per message per recipient. |
 | Rounds | `rounds.*` | Count, per-round time limit, pause, stop on first pass, step cap per round. |
 | Graph visibility | `market.graph_visibility` | `neighbors` or `full`. |
+| Token transfer | `market.token_transfer` | `move` (default: one holder per token) or `copy` (non-rival). |
 | Memory | `memory.*` | On/off and size limits. |
 | Context policy | `context.*` | Window budget, reset threshold, reset each round, summary limits. |
 | Prompt | `prompt_file`, `prompt_vars` | A `$placeholder` template; the default is `prompts/system.md`. |

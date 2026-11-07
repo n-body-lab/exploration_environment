@@ -35,14 +35,16 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 MARKET_TOOLS = [
     ToolSpec("get_status",
-             "Get the current round, your credits, the tokens you hold (with contents), your task, time left in "
-             "the round, the communication cost and the list of participants.", _obj({}, [])),
+             "Get the current round, your credits, the tokens you hold and every token content you know (including "
+             "tokens you have sold), your task, time left in the round, the communication cost and the list of "
+             "participants.", _obj({}, [])),
     ToolSpec("view_graph",
-             "See who you can buy tokens from and at what cost (and which tokens they currently hold), and who can "
-             "buy from you. Every token from a given node costs the same.", _obj({}, [])),
+             "See who you can buy tokens from and at what cost, and who can buy from you. Every token from a given "
+             "node costs the same. It does not show what other nodes hold.", _obj({}, [])),
     ToolSpec("buy",
              "Buy a token from another node through the broker at that node's fixed edge cost. The credits go to "
-             "the seller and you receive the token's content. Any node can sell tokens it bought.",
+             "the seller and you receive the token and its content. Fails if the seller doesn't hold it. Any node "
+             "can sell tokens it bought.",
              _obj({"token": {"type": "string"}, "seller": {"type": "string"}}, ["token", "seller"])),
     ToolSpec("send_message",
              "Send a message to another agent through the broker. Each message costs the communication cost in "
