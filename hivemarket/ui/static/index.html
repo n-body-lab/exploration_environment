@@ -19,8 +19,15 @@
 
 <div id="error" class="error" hidden></div>
 <section id="timeline">
-  <button id="play" title="Replay from the slider position">▶</button>
-  <select id="speed" title="Replay speed"><option value="1">1×</option><option value="5" selected>5×</option><option value="20">20×</option></select>
+  <button id="play" title="Replay from the slider position (space)">▶</button>
+  <label class="small" title="Replay speed: run seconds per real second">speed
+    <select id="speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1">1×</option>
+      <option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option>
+      <option value="20">20×</option><option value="50">50×</option>
+    </select></label>
+  <label class="small" title="While replaying, jump over stretches with no events (e.g. Docker start-up, agents waiting)">
+    <input type="checkbox" id="skip-gaps" checked> skip quiet gaps</label>
   <input id="scrub" type="range" min="0" max="1000" value="1000">
   <span id="clock" class="mono">--:--:--</span>
   <button id="live" class="on" title="Follow the newest events">Live</button>

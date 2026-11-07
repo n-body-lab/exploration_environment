@@ -129,12 +129,32 @@
   $("live").addEventListener("click", () => {
     if (S.live) { S.viewT = tMax(); setLive(false); } else setLive(true);
   });
-  $("speed").addEventListener("change", e => { S.speed = +e.target.value; });
-  $("play").addEventListener("click", () => {
+  const GAP_SECONDS = 2; // with "skip quiet gaps", a replay jumps over any stretch longer than this with no events
+  function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* storage unavailable */ } }
+  function loadPref(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+  const savedSpeed = loadPref("hm-speed"), savedSkip = loadPref("hm-skip-gaps");
+  if (savedSpeed && [...$("speed").options].some(o => o.value === savedSpeed)) $("speed").value = savedSpeed;
+  if (savedSkip !== null) $("skip-gaps").checked = savedSkip === "1";
+  S.speed = +$("speed").value;
+  $("speed").addEventListener("change", e => { S.speed = +e.target.value; savePref("hm-speed", e.target.value); });
+  $("skip-gaps").addEventListener("change", e => savePref("hm-skip-gaps", e.target.checked ? "1" : "0"));
+  // The first event after time t (binary search), for skipping quiet gaps.
+  function nextEventTs(t) {
+    let lo = 0, hi = S.events.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (S.events[mid].ts <= t) lo = mid + 1; else hi = mid; }
+    return lo < S.events.length ? S.events[lo].ts : Infinity;
+  }
+  function togglePlay() {
     if (S.live) { S.viewT = tMin(); setLive(false); }
+    else if (!S.playing && S.viewT >= tMax()) S.viewT = tMin(); // at the end: start over
     S.playing = !S.playing;
     $("play").textContent = S.playing ? "❚❚" : "▶";
+  }
+  document.addEventListener("keydown", e => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+    if (e.code === "Space" && !typing && !$("timeline").hidden) { e.preventDefault(); togglePlay(); }
   });
+  $("play").addEventListener("click", togglePlay);
 
   // ---------------------------------------------------------------------- graph
   function layout(ids) {
@@ -382,6 +402,10 @@
     if (S.meta) {
       if (S.playing) {
         S.viewT += dt * S.speed;
+        if ($("skip-gaps").checked) {
+          const next = nextEventTs(S.viewT);
+          if (next - S.viewT > GAP_SECONDS && next !== Infinity) S.viewT = next - 0.2; // land just before it
+        }
         if (S.viewT >= tMax()) { S.viewT = tMax(); S.playing = false; $("play").textContent = "▶"; }
         S.dirty = true;
       }
