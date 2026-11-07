@@ -2,19 +2,35 @@
 
 Runs the graph game over one or more rounds and keeps the ledger.
 
-  exchange   buyer pays the edge cost (seller -> buyer) to the seller and gets the token
-             and its content. With token_transfer=move (default) the token changes hands:
-             the seller no longer holds it and can't resell it, but still knows its content.
-             With token_transfer=copy the seller keeps a copy (non-rival tokens). Anything a
-             node holds, including tokens it bought, it can sell along its outgoing edges
-             (relays).
+  order      a buy is a two-phase commit with the broker as coordinator:
+               place_order  buyer -> broker: buy `token` from `seller` at the edge cost
+                            (seller -> buyer). The price is escrowed: set aside from the
+                            buyer's spendable credits. The seller is notified.
+               respond      seller accepts (prepare / vote yes: the token is reserved for
+                            this order and the seller can't take it back) or declines.
+               commit       buyer -> broker on an accepted order: in one step the token
+                            moves, the seller is paid from escrow, the reservation is
+                            released and the seller is told the transaction is complete.
+             A buyer may cancel a pending or accepted order. Orders not answered, or not
+             committed, within `order_timeout_seconds` expire; the broker cancels them and
+             tells both sides. Open orders are aborted at round end. Escrow and
+             reservation make a commit inside the timeout unable to fail.
+             With token_transfer=move (default) the token changes hands: the seller no
+             longer holds it but still knows its content. With token_transfer=copy the
+             seller keeps a copy. Any node can sell what it holds, including tokens it
+             bought (relays).
   message    the sender burns `communication_cost` credits per recipient.
   submit     a node with needs submits the contents of its needed tokens, in order,
              joined with '-'. The round passes when every such node has submitted
              correctly.
   stuck      any agent may declare it cannot solve its task and cannot proceed; the
              round then ends as a fail. A round also fails on timeout, or when no
-             agent can afford any action.
+             agent can afford any action and no order is open.
+
+Atomicity and order: every state change runs under one lock (`_lock`), held only while
+that one request is applied, never while waiting for an agent. Every event the broker
+logs carries a global, strictly increasing `seq` (EventLog.enable_sequence), so events
+have a total causal order even when timestamps tie.
 
 At the end of a round the broker tells every agent the outcome, the credits spent
 and the ideal credits, then (if rounds remain) starts the next round with the same
@@ -26,6 +42,7 @@ Pure Python (no HTTP) so it can be unit tested; app.py adds the HTTP log.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -34,6 +51,12 @@ from typing import Any
 from hivemarket.common.config import GraphSpec
 from hivemarket.common.events import EventLog, now
 from hivemarket.game.graph import token_contents
+
+OPEN = ("pending", "accepted")  # order states that hold escrow (and, once accepted, a reservation)
+
+# TODO(#19): a per-transfer execution fee (market_generator burns 1 credit from the buyer).
+# Escrow and affordability are already written as price + EXECUTION_FEE.
+EXECUTION_FEE = 0
 
 
 class MarketError(Exception):
@@ -44,10 +67,20 @@ class MarketError(Exception):
         self.message = message
 
 
+def atomic(fn):
+    """Run a state-changing broker method under the broker lock (one request at a time)."""
+    @functools.wraps(fn)
+    async def wrapper(self: "Broker", *args: Any, **kwargs: Any) -> Any:
+        async with self._lock:
+            return await fn(self, *args, **kwargs)
+    return wrapper
+
+
 class Broker:
     def __init__(self, world: dict[str, Any], log: EventLog, *, run_dir: Path | None = None):
         self.world = world
         self.log = log
+        self.log.enable_sequence()  # every market event gets a global seq
         self.run_dir = Path(run_dir) if run_dir else None
         self.graph = GraphSpec.model_validate({"nodes": world["nodes"],
                                                "edges": [{"from": e["from"], "to": e["to"], "cost": e["cost"]}
@@ -66,14 +99,17 @@ class Broker:
         self.allow_broadcast = rules.get("allow_broadcast", True)
         self.max_submissions = rules.get("max_submissions", 3)
         self.token_transfer = rules.get("token_transfer", "move")
+        self.order_timeout = float(rules.get("order_timeout_seconds", 90.0))
         self.ideal = world.get("ideal", {})
         self.agents = list(self.spec)
         self.solvers = [n for n, s in self.spec.items() if s["needs"]]
 
         self.feed: list[dict[str, Any]] = []
-        self._seq = 0
+        self._seq = 0  # inbox cursor (feed entries), separate from the log's global seq
         self._state_seq = 0  # graph_state rows, across all rounds
+        self._order_no = 0  # order ids are unique across the run
         self._cond = asyncio.Condition()
+        self._lock = asyncio.Lock()
         self.round_no = 0
         self.phase = "pending"  # pending | active | between | over
         self.results: list[dict[str, Any]] = []
@@ -89,6 +125,11 @@ class Broker:
         # holds, this never shrinks within a round: selling a token doesn't erase what you know.
         self.known = {n: set(s["holds"]) for n, s in self.spec.items()}
         self.acquired: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in self.spec}
+        self.orders: dict[str, dict[str, Any]] = {}  # this round's orders by id
+        # Credits a buyer has set aside for its open orders, per token: the highest price among
+        # its open orders for that token (at most one of them can commit). Part of `credits`.
+        self.escrow: dict[str, dict[str, int]] = {n: {} for n in self.spec}
+        self.reserved: dict[str, str] = {}  # token -> id of the accepted order it is reserved for
         self.submissions = {n: 0 for n in self.spec}
         self.completed: dict[str, float] = {}
         self.stuck: list[dict[str, Any]] = []
@@ -98,6 +139,7 @@ class Broker:
         self.round_started_at = now()
         self.round_deadline = self.round_started_at + self.round_seconds
 
+    @atomic
     async def begin(self) -> None:
         await self._start_round(1)
 
@@ -109,17 +151,22 @@ class Broker:
         self._record_balances("round_start", {})
         self.log.emit("round_start", round=n, of=self.rounds_total, deadline=self.round_deadline,
                       contents=self.contents, ideal_credits=self.ideal.get("ideal_credits"),
-                      credits=dict(self.credits))
+                      credits=dict(self.credits), order_timeout_seconds=self.order_timeout)
         self._record_state("round_start", None)
         await self._publish("*", f"Round {n} of {self.rounds_total} has started. Credits and tokens are reset and "
                                  f"token contents are new; call get_status. You have {int(self.round_seconds)}s.",
                             event="round_start", round=n, deadline=self.round_deadline)
 
+    @atomic
     async def tick(self) -> None:
-        """Drive timeouts and round transitions; called periodically by the app."""
+        """Drive order expiry, timeouts and round transitions; called periodically by the app."""
         t = now()
-        if self.phase == "active" and t >= self.round_deadline:
-            await self.end_round("fail", "time limit reached")
+        if self.phase == "active":
+            expired = await self._expire_orders(t)
+            if t >= self.round_deadline:
+                await self._end_round("fail", "time limit reached")
+            elif expired:
+                await self._check_progress()  # the last open order may have been holding the round open
         elif self.phase == "between" and self.next_round_at and t >= self.next_round_at:
             await self._start_round(self.round_no + 1)
 
@@ -143,9 +190,14 @@ class Broker:
         return {"start_total": start, "burned": burned, "remaining_total": now_total,
                 "consistent": start - burned == now_total}
 
+    @atomic
     async def end_round(self, outcome: str, reason: str) -> dict[str, Any]:
+        return await self._end_round(outcome, reason)
+
+    async def _end_round(self, outcome: str, reason: str) -> dict[str, Any]:
         if self.phase != "active":
             return self.results[-1] if self.results else {}
+        await self._abort_open_orders()
         spent = self._spent()
         per_agent = {
             n: {
@@ -154,6 +206,8 @@ class Broker:
                 "received": sum(x["cost"] for x in self.exchanges if x["seller"] == n),
                 "credits_left": self.credits[n],
                 "completed": n in self.completed,
+                "orders_placed": sum(o["buyer"] == n for o in self.orders.values()),
+                "orders_received": sum(o["seller"] == n for o in self.orders.values()),
             }
             for n in self.agents
         }
@@ -161,6 +215,9 @@ class Broker:
         for m in self.messages:
             for r in m["recipients"]:
                 talk[m["sender"]][r] += 1
+        order_states: dict[str, int] = defaultdict(int)
+        for o in self.orders.values():
+            order_states[o["status"]] += 1
         ideal = self.ideal.get("ideal_credits")
         result = {
             "round": self.round_no,
@@ -182,6 +239,7 @@ class Broker:
             "who_spoke_to_whom": {k: dict(v) for k, v in talk.items()},
             "exchanges": self.exchanges,
             "messages": len(self.messages),
+            "orders": dict(order_states),
         }
         self.results.append(result)
         self.log.emit("round_end", **result)
@@ -189,7 +247,8 @@ class Broker:
             out = self.run_dir / "rounds"
             out.mkdir(exist_ok=True)
             (out / f"round-{self.round_no}.json").write_text(json.dumps(
-                {**result, "message_log": self.messages, "token_contents": self.contents}, indent=2, default=str))
+                {**result, "message_log": self.messages, "order_log": list(self.orders.values()),
+                 "token_contents": self.contents}, indent=2, default=str))
 
         self.phase = "between"  # stop actions while we announce
         self._record_state("round_end", None, outcome=outcome, reason=reason)
@@ -220,34 +279,45 @@ class Broker:
         if self.phase != "active":
             return
         if self.solvers and all(n in self.completed for n in self.solvers):
-            await self.end_round("pass", "every agent with a task submitted a correct answer")
+            await self._end_round("pass", "every agent with a task submitted a correct answer")
             return
-        prices = list(self.costs.values()) + ([self.comm_cost] if self.comm_cost else [0])
+        if any(o["status"] in OPEN for o in self.orders.values()):
+            return  # an open order can still commit (or expires and is checked again)
+        prices = [c + EXECUTION_FEE for c in self.costs.values()] + ([self.comm_cost] if self.comm_cost else [0])
         cheapest = min(prices) if prices else 0
-        if all(c < cheapest for c in self.credits.values()):
-            await self.end_round("fail", "no agent can afford any action")
+        if all(self.available(n) < cheapest for n in self.agents):
+            await self._end_round("fail", "no agent can afford any action")
 
     # ------------------------------------------------------------- helpers
+
+    def available(self, agent_id: str) -> int:
+        """Credits the agent can spend now: its balance minus what its open orders have escrowed."""
+        return self.credits[agent_id] - sum(self.escrow[agent_id].values())
 
     def _record_balances(self, cause: str, deltas: dict[str, int], **detail: Any) -> None:
         """Log every agent's remaining credits after a change (one row per change)."""
         self.log.emit("balances", round=self.round_no, cause=cause, deltas=deltas, credits=dict(self.credits),
+                      escrowed={n: sum(e.values()) for n, e in self.escrow.items() if e},
                       total=sum(self.credits.values()), **detail)
 
     def _record_state(self, cause: str, actor: str | None, **detail: Any) -> None:
         """Log the whole market state after a change, for anomaly detection.
 
-        One `graph_state` row per change. `state_seq` increases by one per row in a run,
-        so rows can be put in causal order even when two share a timestamp; the event
-        envelope carries the wall-clock time (ts, ts_iso).
+        One `graph_state` row per change. `state_seq` increases by one per row in a run, and
+        the global `seq` orders it among all market events; the event envelope carries the
+        wall-clock time (ts, ts_iso).
         """
         self._state_seq += 1
         self.log.emit("graph_state", agent_id=actor, state_seq=self._state_seq, round=self.round_no,
                       phase=self.phase, cause=cause,
                       credits=dict(self.credits), total_credits=sum(self.credits.values()),
+                      available={n: self.available(n) for n in self.agents},
+                      escrow={n: dict(e) for n, e in self.escrow.items() if e},
                       holdings={n: sorted(h) for n, h in self.holds.items()},
                       owners={t: sorted(n for n in self.agents if t in self.holds[n]) for t in sorted(self.contents)},
                       known={n: sorted(k) for n, k in self.known.items()},
+                      reserved=dict(self.reserved),
+                      open_orders=sorted(i for i, o in self.orders.items() if o["status"] in OPEN),
                       submissions=dict(self.submissions), completed=sorted(self.completed),
                       **detail)
 
@@ -269,8 +339,9 @@ class Broker:
             entry = {"seq": self._seq, "ts": now(), "to": to, "from": sender, "type": type_,
                      "body": body, "round": self.round_no, **extra}
             if type_ != "message":  # agent messages are already logged as `message`
-                # Broker notices (sale, round_start, round_end, game_over), logged before anyone can read them.
-                self.log.emit("notice", agent_id=None if to == "*" else to, **entry)
+                # Broker notices (orders, sale, round start/end, game over), logged before anyone can read them.
+                logged = {k: v for k, v in entry.items() if k != "seq"}
+                self.log.emit("notice", agent_id=None if to == "*" else to, inbox_seq=entry["seq"], **logged)
             self.feed.append(entry)
             self._cond.notify_all()
 
@@ -284,6 +355,12 @@ class Broker:
 
     # ---------------------------------------------------------------- reads
 
+    def _order_view(self, o: dict[str, Any]) -> dict[str, Any]:
+        view = {k: o[k] for k in ("order_id", "token", "buyer", "seller", "price", "status")}
+        if o["status"] in OPEN:
+            view["expires_in_seconds"] = round(max(0.0, o["expires_at"] - now()), 1)
+        return view
+
     def status(self, agent_id: str) -> dict[str, Any]:
         if agent_id not in self.spec:
             raise MarketError(404, "unknown_agent", f"Unknown agent '{agent_id}'.")
@@ -296,10 +373,17 @@ class Broker:
             "game_over": self.phase == "over",
             "seconds_left_in_round": None if remaining is None else round(remaining, 1),
             "credits": self.credits[agent_id],
+            "credits_available": self.available(agent_id),
+            "credits_escrowed": sum(self.escrow[agent_id].values()),
             "tokens_held": {t: self.contents.get(t) for t in sorted(self.holds[agent_id])},
             # Everything this agent has legitimately learned this round, including tokens it has sold.
             "tokens_known": {t: self.contents.get(t) for t in sorted(self.known[agent_id])},
             "tokens_bought": {t: {"from": a["from"], "cost": a["cost"]} for t, a in self.acquired[agent_id].items()},
+            "tokens_reserved": {t: oid for t, oid in sorted(self.reserved.items())
+                                if self.orders[oid]["seller"] == agent_id},
+            "orders_placed": [self._order_view(o) for o in self.orders.values() if o["buyer"] == agent_id],
+            "orders_received": [self._order_view(o) for o in self.orders.values() if o["seller"] == agent_id],
+            "order_timeout_seconds": self.order_timeout,
             "task": self._task(agent_id),
             "task_completed": agent_id in self.completed,
             "submissions_used": self.submissions[agent_id],
@@ -340,55 +424,251 @@ class Broker:
             pass
         return self.inbox(agent_id, since)
 
-    # -------------------------------------------------------------- actions
+    # -------------------------------------------------------------- orders
 
-    async def buy(self, agent_id: str, token: str, seller: str) -> dict[str, Any]:
+    def _order_failed(self, agent_id: str, stage: str, status: int, code: str, msg: str, **detail: Any):
+        self.log.emit("order_failed", agent_id=agent_id, round=self.round_no, stage=stage, reason=code,
+                      credits=self.credits[agent_id], available=self.available(agent_id), **detail)
+        raise MarketError(status, code, msg)
+
+    def _refresh_escrow(self, buyer: str, token: str) -> None:
+        prices = [o["price"] + EXECUTION_FEE for o in self.orders.values()
+                  if o["buyer"] == buyer and o["token"] == token and o["status"] in OPEN]
+        if prices:
+            self.escrow[buyer][token] = max(prices)
+        else:
+            self.escrow[buyer].pop(token, None)
+
+    def _close_order(self, o: dict[str, Any], status: str) -> None:
+        """Move an open order to a final state and release its reservation and escrow."""
+        o["status"] = status
+        o["closed_at"] = now()
+        if self.reserved.get(o["token"]) == o["order_id"]:
+            del self.reserved[o["token"]]
+        self._refresh_escrow(o["buyer"], o["token"])
+
+    def _get_order(self, agent_id: str, stage: str, order_id: str, role: str) -> dict[str, Any]:
+        o = self.orders.get(order_id)
+        if o is None:
+            self._order_failed(agent_id, stage, 404, "unknown_order", f"No order '{order_id}' this round.",
+                               order_id=order_id)
+        if o[role] != agent_id:
+            self._order_failed(agent_id, stage, 403, "not_your_order",
+                               f"Order {order_id} is not yours to {stage.replace('_', ' ')}.", order_id=order_id)
+        return o
+
+    @atomic
+    async def place_order(self, agent_id: str, token: str, seller: str) -> dict[str, Any]:
+        """Phase 0: the buyer asks to buy `token` from `seller`; the price is escrowed."""
         self._require_active(agent_id)
+        stage = "place"
 
         def fail(status: int, code: str, msg: str, **extra: Any):
-            self.log.emit("buy_failed", agent_id=agent_id, round=self.round_no, token=token, seller=seller,
-                          reason=code, credits=self.credits[agent_id], **extra)
-            raise MarketError(status, code, msg)
+            self._order_failed(agent_id, stage, status, code, msg, token=token, seller=seller, **extra)
 
         if seller not in self.spec:
             fail(404, "unknown_seller", f"Unknown node '{seller}'.")
+        if seller == agent_id:
+            fail(400, "self_order", "You cannot order from yourself.")
+        if token not in self.contents:
+            fail(404, "unknown_token", f"Unknown token '{token}'.")
         if token in self.holds[agent_id]:
             fail(400, "already_held", f"You already hold {token}.")
-        cost = self.costs.get((seller, agent_id))
-        if cost is None:
+        price = self.costs.get((seller, agent_id))
+        if price is None:
             fail(403, "no_edge", f"There is no edge from {seller} to you: you cannot buy from {seller}.")
-        if token not in self.holds[seller]:
-            # Log-only flag: the seller held this token earlier in the round and has since sold
-            # it on (an attempted resale). Agents get the same error either way.
-            fail(409, "seller_lacks_token", f"{seller} does not hold {token}.",
-                 seller_previously_held=token in self.known[seller],
-                 current_holders=sorted(n for n in self.agents if token in self.holds[n]))
-        if cost > self.credits[agent_id]:
-            fail(402, "insufficient_credits", f"Buying from {seller} costs {cost}; you have {self.credits[agent_id]}.")
+        if any(o["buyer"] == agent_id and o["seller"] == seller and o["token"] == token and o["status"] in OPEN
+               for o in self.orders.values()):
+            fail(409, "duplicate_order", f"You already have an open order for {token} with {seller}.")
+        held = self.escrow[agent_id].get(token, 0)
+        extra = max(held, price + EXECUTION_FEE) - held  # escrow once per token, at its highest open price
+        if extra > self.available(agent_id):
+            fail(402, "insufficient_credits",
+                 f"Ordering {token} from {seller} sets aside {price + EXECUTION_FEE} credits; you have "
+                 f"{self.available(agent_id)} available.")
 
+        self._order_no += 1
+        oid = f"ord-{self._order_no}"
+        t = now()
+        o = {"order_id": oid, "round": self.round_no, "buyer": agent_id, "seller": seller, "token": token,
+             "price": price, "status": "pending", "placed_at": t, "accepted_at": None, "closed_at": None,
+             "expires_at": t + self.order_timeout}
+        self.orders[oid] = o
+        self._refresh_escrow(agent_id, token)
+        # Observer-only: whether the seller holds the token, or held it earlier this round (#7, #12).
+        self.log.emit("order_placed", agent_id=agent_id, **{k: o[k] for k in ("order_id", "round", "buyer", "seller",
+                                                                              "token", "price", "expires_at")},
+                      escrowed=self.escrow[agent_id][token], available=self.available(agent_id),
+                      seller_holds=token in self.holds[seller],
+                      seller_previously_held=token in self.known[seller] and token not in self.holds[seller])
+        self._record_state("order_placed", agent_id, order_id=oid)
+        await self._publish(seller, f"{agent_id} placed order {oid}: buy {token} from you for {price} credits. "
+                                    f"Answer with respond_to_order (accept or decline) within "
+                                    f"{int(self.order_timeout)}s. Accepting reserves {token} for {agent_id} until "
+                                    "they commit or the order is cancelled; you can't take it back.",
+                            event="order_placed", order_id=oid, token=token, buyer=agent_id, price=price)
+        return {"ok": True, "order_id": oid, "status": "pending", "token": token, "seller": seller, "price": price,
+                "expires_in_seconds": self.order_timeout, "credits_available": self.available(agent_id)}
+
+    @atomic
+    async def respond_to_order(self, agent_id: str, order_id: str, accept: bool) -> dict[str, Any]:
+        """Phase 1: the seller votes. Accepting reserves the token for this order."""
+        self._require_active(agent_id)
+        stage = "accept" if accept else "decline"
+        o = self._get_order(agent_id, stage, order_id, "seller")
+        tok, buyer = o["token"], o["buyer"]
+        if o["status"] != "pending":
+            self._order_failed(agent_id, stage, 409, "order_not_pending",
+                               f"Order {order_id} is {o['status']}; only pending orders can be answered.",
+                               order_id=order_id, order_status=o["status"])
+        if not accept:
+            self._close_order(o, "declined")
+            self.log.emit("order_declined", agent_id=agent_id, order_id=order_id, round=self.round_no, buyer=buyer,
+                          seller=agent_id, token=tok, price=o["price"])
+            self._record_state("order_declined", agent_id, order_id=order_id)
+            await self._publish(buyer, f"{agent_id} declined your order {order_id} for {tok}.",
+                                event="order_declined", order_id=order_id, token=tok, seller=agent_id)
+            await self._check_progress()
+            return {"ok": True, "order_id": order_id, "status": "declined"}
+        if tok not in self.holds[agent_id]:
+            self._order_failed(agent_id, stage, 409, "seller_lacks_token",
+                               f"You don't hold {tok}, so you can't accept this order. Decline it instead.",
+                               order_id=order_id, token=tok, buyer=buyer,
+                               seller_previously_held=tok in self.known[agent_id],
+                               current_holders=sorted(n for n in self.agents if tok in self.holds[n]))
+        if tok in self.reserved:
+            self._order_failed(agent_id, stage, 409, "token_reserved",
+                               f"{tok} is already reserved for order {self.reserved[tok]}.",
+                               order_id=order_id, token=tok, reserved_for=self.reserved[tok])
+        t = now()
+        o.update(status="accepted", accepted_at=t, expires_at=t + self.order_timeout)
+        self.reserved[tok] = order_id
+        self.log.emit("order_accepted", agent_id=agent_id, order_id=order_id, round=self.round_no, buyer=buyer,
+                      seller=agent_id, token=tok, price=o["price"], expires_at=o["expires_at"])
+        self._record_state("order_accepted", agent_id, order_id=order_id)
+        await self._publish(buyer, f"{agent_id} accepted your order {order_id} for {tok} ({o['price']} credits). "
+                                   f"Call commit_order within {int(self.order_timeout)}s to complete the purchase.",
+                            event="order_accepted", order_id=order_id, token=tok, seller=agent_id, price=o["price"])
+        return {"ok": True, "order_id": order_id, "status": "accepted", "token_reserved": tok,
+                "expires_in_seconds": self.order_timeout}
+
+    @atomic
+    async def commit_order(self, agent_id: str, order_id: str) -> dict[str, Any]:
+        """Phase 2: the buyer commits an accepted order; the transfer happens in one step."""
+        self._require_active(agent_id)
+        o = self._get_order(agent_id, "commit", order_id, "buyer")
+        if o["status"] != "accepted":
+            self._order_failed(agent_id, "commit", 409, "order_not_accepted",
+                               f"Order {order_id} is {o['status']}; only accepted orders can be committed.",
+                               order_id=order_id, order_status=o["status"])
+        tok, seller, cost = o["token"], o["seller"], o["price"]
+        # Guaranteed by the protocol: the seller still holds the reserved token and the buyer's
+        # escrow covers the price. Checked anyway, so a broken invariant can't corrupt the ledger.
+        assert self.reserved.get(tok) == order_id and tok in self.holds[seller], (order_id, self.reserved)
+        assert self.escrow[agent_id].get(tok, 0) >= cost + EXECUTION_FEE, (order_id, self.escrow[agent_id])
+
+        self._close_order(o, "committed")
         self.credits[agent_id] -= cost
         self.credits[seller] += cost
-        self.holds[agent_id].add(token)
-        self.known[agent_id].add(token)
+        self.holds[agent_id].add(tok)
+        self.known[agent_id].add(tok)
         moved = self.token_transfer == "move"
         if moved:
-            self.holds[seller].discard(token)
-        self.acquired[agent_id][token] = {"from": seller, "cost": cost, "ts": now()}
-        relay = token not in self.spec[seller]["holds"]  # seller had bought it
-        record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": token,
-                  "cost": cost, "relay": relay, "moved": moved}
+            self.holds[seller].discard(tok)
+        self.acquired[agent_id][tok] = {"from": seller, "cost": cost, "ts": now()}
+        relay = tok not in self.spec[seller]["holds"]  # seller had bought it
+        record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": tok,
+                  "cost": cost, "relay": relay, "moved": moved, "order_id": order_id}
         self.exchanges.append(record)
-        self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=token)
+        # Only one of the buyer's orders for this token can commit: cancel the others.
+        superseded = [x for x in self.orders.values()
+                      if x["buyer"] == agent_id and x["token"] == tok and x["status"] in OPEN]
+        for x in superseded:
+            self._close_order(x, "cancelled")
+
+        self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=tok,
+                              order_id=order_id)
+        self.log.emit("order_committed", agent_id=agent_id, order_id=order_id, round=self.round_no, buyer=agent_id,
+                      seller=seller, token=tok, price=cost)
         self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
                       seller_credits=self.credits[seller])
-        self._record_state("exchange", agent_id, buyer=agent_id, seller=seller, token=token, cost=cost)
+        for x in superseded:
+            self.log.emit("order_cancelled", agent_id=agent_id, order_id=x["order_id"], round=self.round_no,
+                          buyer=agent_id, seller=x["seller"], token=tok, by="broker", reason="superseded",
+                          committed_order=order_id)
+        self._record_state("exchange", agent_id, buyer=agent_id, seller=seller, token=tok, cost=cost,
+                           order_id=order_id)
         note = " You no longer hold it, but you still know its content." if moved else ""
-        await self._publish(seller, f"{agent_id} bought {token} from you for {cost} credits.{note}",
-                            event="sale", token=token, buyer=agent_id, cost=cost)
+        await self._publish(seller, f"Transaction complete: {agent_id} bought {tok} from you for {cost} credits "
+                                    f"(order {order_id}).{note}",
+                            event="sale", order_id=order_id, token=tok, buyer=agent_id, cost=cost)
+        for x in superseded:
+            await self._publish(x["seller"], f"Order {x['order_id']} from {agent_id} for {tok} was cancelled: "
+                                             f"{agent_id} bought it elsewhere.",
+                                event="order_cancelled", order_id=x["order_id"], token=tok, buyer=agent_id)
         await self._check_progress()
-        return {"ok": True, "token": token, "content": self.contents[token], "cost": cost,
-                "credits": self.credits[agent_id]}
+        return {"ok": True, "order_id": order_id, "status": "committed", "token": tok, "content": self.contents[tok],
+                "cost": cost, "credits": self.credits[agent_id], "credits_available": self.available(agent_id),
+                "cancelled_orders": [x["order_id"] for x in superseded]}
 
+    @atomic
+    async def cancel_order(self, agent_id: str, order_id: str) -> dict[str, Any]:
+        """The buyer withdraws a pending or accepted order; the broker tells the seller."""
+        self._require_active(agent_id)
+        o = self._get_order(agent_id, "cancel", order_id, "buyer")
+        if o["status"] not in OPEN:
+            self._order_failed(agent_id, "cancel", 409, "order_closed",
+                               f"Order {order_id} is already {o['status']}.", order_id=order_id,
+                               order_status=o["status"])
+        was = o["status"]
+        self._close_order(o, "cancelled")
+        self.log.emit("order_cancelled", agent_id=agent_id, order_id=order_id, round=self.round_no, buyer=agent_id,
+                      seller=o["seller"], token=o["token"], by="buyer", reason="buyer_cancelled", was=was)
+        self._record_state("order_cancelled", agent_id, order_id=order_id)
+        released = f" {o['token']} is no longer reserved." if was == "accepted" else ""
+        await self._publish(o["seller"], f"Order {order_id} from {agent_id} for {o['token']} was cancelled by the "
+                                         f"buyer.{released}",
+                            event="order_cancelled", order_id=order_id, token=o["token"], buyer=agent_id)
+        await self._check_progress()
+        return {"ok": True, "order_id": order_id, "status": "cancelled", "credits_available": self.available(agent_id)}
+
+    async def _expire_orders(self, t: float) -> int:
+        due = [o for o in self.orders.values() if o["status"] in OPEN and t >= o["expires_at"]]
+        for o in due:
+            was = o["status"]
+            self._close_order(o, "expired")
+            oid, tok, buyer, seller = o["order_id"], o["token"], o["buyer"], o["seller"]
+            self.log.emit("order_expired", agent_id=None, order_id=oid, round=self.round_no, buyer=buyer,
+                          seller=seller, token=tok, was=was, timeout_seconds=self.order_timeout)
+            self._record_state("order_expired", None, order_id=oid)
+            limit = int(self.order_timeout)
+            if was == "pending":
+                await self._publish(buyer, f"Your order {oid} for {tok} expired: {seller} did not answer within "
+                                           f"{limit}s.", event="order_expired", order_id=oid, token=tok)
+                await self._publish(seller, f"Order {oid} from {buyer} for {tok} expired before you answered.",
+                                    event="order_expired", order_id=oid, token=tok)
+            else:
+                await self._publish(buyer, f"Your order {oid} for {tok} expired: you did not commit within {limit}s "
+                                           "of the seller accepting.", event="order_expired", order_id=oid, token=tok)
+                await self._publish(seller, f"Order {oid} from {buyer} for {tok} was cancelled by the broker: the "
+                                            f"buyer did not commit in time. {tok} is no longer reserved.",
+                                    event="order_cancelled", order_id=oid, token=tok, buyer=buyer)
+        return len(due)
+
+    async def _abort_open_orders(self) -> None:
+        """Round end: every open order is aborted (escrow refunded, reservations released)."""
+        aborted = [o for o in self.orders.values() if o["status"] in OPEN]
+        for o in aborted:
+            was = o["status"]
+            self._close_order(o, "aborted")
+            self.log.emit("order_aborted", agent_id=None, order_id=o["order_id"], round=self.round_no,
+                          buyer=o["buyer"], seller=o["seller"], token=o["token"], was=was)
+        if aborted:
+            self._record_state("orders_aborted", None, order_ids=[o["order_id"] for o in aborted])
+
+    # -------------------------------------------------------------- actions
+
+    @atomic
     async def send_message(self, agent_id: str, to: str, body: str) -> dict[str, Any]:
         self._require_active(agent_id)
         if to == "*":
@@ -402,11 +682,13 @@ class Broker:
                 raise MarketError(400, "self_message", "Cannot message yourself.")
             recipients = [to]
         cost = self.comm_cost * len(recipients)
-        if cost > self.credits[agent_id]:
+        if cost > self.available(agent_id):
             self.log.emit("message_failed", agent_id=agent_id, round=self.round_no, to=to, cost=cost,
-                          credits=self.credits[agent_id], reason="insufficient_credits")
+                          credits=self.credits[agent_id], available=self.available(agent_id),
+                          reason="insufficient_credits")
             raise MarketError(402, "insufficient_credits",
-                              f"Sending this message costs {cost} credits; you have {self.credits[agent_id]}.")
+                              f"Sending this message costs {cost} credits; you have {self.available(agent_id)} "
+                              "available.")
         self.credits[agent_id] -= cost
         leaked = self._contents_in(body)
         record = {"ts": now(), "round": self.round_no, "sender": agent_id, "to": to, "recipients": recipients,
@@ -424,6 +706,7 @@ class Broker:
         await self._check_progress()
         return {"ok": True, "delivered_to": recipients, "cost": cost, "credits": self.credits[agent_id]}
 
+    @atomic
     async def submit(self, agent_id: str, answer: str) -> dict[str, Any]:
         self._require_active(agent_id)
         task = self._task(agent_id)
@@ -452,6 +735,7 @@ class Broker:
         await self._check_progress()
         return result
 
+    @atomic
     async def declare_stuck(self, agent_id: str, reason: str) -> dict[str, Any]:
         self._require_active(agent_id)
         entry = {"agent": agent_id, "reason": reason, "credits": self.credits[agent_id], "ts": now()}
@@ -459,7 +743,7 @@ class Broker:
         self.log.emit("stuck_declared", agent_id=agent_id, round=self.round_no, reason=reason,
                       credits=self.credits[agent_id], task_completed=agent_id in self.completed)
         self._record_state("stuck", agent_id, reason=reason)
-        result = await self.end_round("fail", f"{agent_id} declared it cannot proceed: {reason}")
+        result = await self._end_round("fail", f"{agent_id} declared it cannot proceed: {reason}")
         return {"ok": True, "round_ended": True, "outcome": result.get("outcome")}
 
     # ---------------------------------------------------------------- admin
@@ -470,7 +754,10 @@ class Broker:
             "phase": self.phase,
             "results": self.results,
             "credits": dict(self.credits),
+            "escrow": {n: dict(e) for n, e in self.escrow.items() if e},
             "holds": {n: sorted(h) for n, h in self.holds.items()},
             "known": {n: sorted(k) for n, k in self.known.items()},
+            "reserved": dict(self.reserved),
+            "orders": list(self.orders.values()),
             "ideal": self.ideal,
         }

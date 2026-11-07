@@ -84,9 +84,22 @@ class EventLog:
         self.run_id = run_id
         self.sink = sink
         self.echo = echo
+        self.seq: int | None = None  # see enable_sequence()
+
+    def enable_sequence(self) -> None:
+        """Number every event from now on: data.seq = 1, 2, 3, ... in emission order.
+
+        Gives a total order even when two events share a timestamp (the broker uses it
+        for causal order). Idempotent.
+        """
+        if self.seq is None:
+            self.seq = 0
 
     def emit(self, kind: str, agent_id: str | None = None, _ts: float | None = None, **data: Any) -> dict[str, Any]:
         """`_ts` overrides the event time when the observer knows when it happened (e.g. packet capture time)."""
+        if self.seq is not None:
+            self.seq += 1
+            data["seq"] = self.seq
         event = make_event(self.source, kind, data, agent_id=agent_id, run_id=self.run_id, ts=_ts)
         self.sink.write(event)
         if self.echo:

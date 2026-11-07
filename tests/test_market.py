@@ -1,4 +1,4 @@
-"""Broker: graph pricing, relays, communication cost, rounds, ledger."""
+"""Broker: graph pricing, relays, communication cost, rounds, ledger, buy orders (2PC)."""
 
 import asyncio
 import json
@@ -46,18 +46,33 @@ def answer(b, node):
     return "-".join(b.contents[t] for t in b.spec[node]["needs"])
 
 
+async def trade(b, buyer, token, seller):
+    """A full buy through the two-phase commit: place, the seller accepts, commit.
+
+    If the seller can't accept (e.g. it doesn't hold the token) it declines, as an honest seller
+    would, and the broker's error is re-raised.
+    """
+    order = await b.place_order(buyer, token, seller)
+    try:
+        await b.respond_to_order(seller, order["order_id"], True)
+    except MarketError:
+        await b.respond_to_order(seller, order["order_id"], False)
+        raise
+    return await b.commit_order(buyer, order["order_id"])
+
+
 async def test_relay_purchase_and_pass(broker):
     with pytest.raises(MarketError) as e:
-        await broker.buy("c", "A1", "a")  # no edge a -> c
+        await trade(broker, "c", "A1", "a")  # no edge a -> c
     assert e.value.code == "no_edge"
     with pytest.raises(MarketError) as e:
-        await broker.buy("c", "A1", "b")  # b doesn't hold A1 yet
+        await trade(broker, "c", "A1", "b")  # b doesn't hold A1 yet
     assert e.value.code == "seller_lacks_token"
 
-    r = await broker.buy("b", "A1", "a")
+    r = await trade(broker, "b", "A1", "a")
     assert r["cost"] == 10 and broker.credits == {"a": 110, "b": 90, "c": 60}
-    await broker.buy("c", "A1", "b")  # relay
-    await broker.buy("c", "B1", "b")
+    await trade(broker, "c", "A1", "b")  # relay
+    await trade(broker, "c", "B1", "b")
     assert broker.exchanges[1]["relay"] is True and broker.exchanges[2]["relay"] is False
     # Tokens moved along the relay: each ends with its last buyer only.
     assert broker.holds == {"a": {"A2"}, "b": set(), "c": {"A1", "B1"}}
@@ -97,12 +112,12 @@ async def test_communication_cost_burns_per_recipient(broker):
 
 
 async def test_stuck_ends_round_and_next_round_resets(broker):
-    await broker.buy("b", "A1", "a")
+    await trade(broker, "b", "A1", "a")
     old = dict(broker.contents)
     await broker.declare_stuck("c", "out of credits")
     assert broker.phase == "between" and broker.results[0]["outcome"] == "fail"
     with pytest.raises(MarketError) as e:
-        await broker.buy("c", "B1", "b")
+        await trade(broker, "c", "B1", "b")
     assert e.value.code == "round_over"
     notices = [m["body"] for m in broker.inbox("a") if m.get("event") == "round_end"]
     assert "FAIL" in notices[0] and "Credits spent this round: 10" in notices[0] and "Ideal cost to solve: 18" in notices[0]
@@ -157,18 +172,18 @@ async def test_status_shows_only_own_credits_and_tokens(broker):
 async def test_sold_token_moves_but_stays_known(tmp_path):
     b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    await b.buy("b", "A1", "a")
+    await trade(b, "b", "A1", "a")
     assert "A1" not in b.holds["a"] and "A1" in b.known["a"]  # a sold it but still knows it
-    await b.buy("c", "A1", "b")  # relay: b passes A1 on
+    await trade(b, "c", "A1", "b")  # relay: b passes A1 on
     sb = b.status("b")
     assert "A1" not in sb["tokens_held"] and sb["tokens_known"]["A1"] == b.contents["A1"]
     assert any("You no longer hold it" in m["body"] for m in b.inbox("b") if m.get("event") == "sale")
 
     with pytest.raises(MarketError) as e:  # b can't sell A1 a second time (here to a, via edge b -> a)
-        await b.buy("a", "A1", "b")
+        await trade(b, "a", "A1", "b")
     assert e.value.code == "seller_lacks_token"
     with pytest.raises(MarketError) as e:  # and a no longer has it to sell back to b
-        await b.buy("b", "A1", "a")
+        await trade(b, "b", "A1", "a")
     assert e.value.code == "seller_lacks_token"
 
     # Using or mentioning a token you sold is legitimate; one you never obtained is not.
@@ -185,8 +200,8 @@ async def test_sold_token_moves_but_stays_known(tmp_path):
 async def test_copy_mode_keeps_seller_copy(tmp_path):
     b = Broker(world(rounds=1, token_transfer="copy"), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    await b.buy("b", "A1", "a")
-    await b.buy("c", "A1", "b")
+    await trade(b, "b", "A1", "a")
+    await trade(b, "c", "A1", "b")
     assert "A1" in b.holds["a"] and "A1" in b.holds["b"] and "A1" in b.holds["c"]
     assert not b.exchanges[0]["moved"] and b.status("a")["token_transfer"] == "copy"
     assert not any("no longer hold" in m["body"] for m in b.inbox("a"))
@@ -195,21 +210,27 @@ async def test_copy_mode_keeps_seller_copy(tmp_path):
 async def test_graph_state_logged_after_every_change(tmp_path):
     b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    await b.buy("b", "A1", "a")
+    await trade(b, "b", "A1", "a")
     await b.send_message("c", "b", "please pass A1 on")
     await b.submit("b", answer(b, "b"))
     await b.declare_stuck("c", "giving up")
     events = read_jsonl(tmp_path / "m.jsonl")
     rows = [e for e in events if e["kind"] == "graph_state"]
-    assert [r["data"]["cause"] for r in rows] == ["round_start", "exchange", "message", "submission", "stuck", "round_end"]
-    assert [r["data"]["state_seq"] for r in rows] == [1, 2, 3, 4, 5, 6]  # causal order, even on equal ts
+    assert [r["data"]["cause"] for r in rows] == ["round_start", "order_placed", "order_accepted", "exchange",
+                                                  "message", "submission", "stuck", "round_end"]
+    assert [r["data"]["state_seq"] for r in rows] == list(range(1, 9))  # causal order, even on equal ts
     assert all(r["ts"] and r["ts_iso"] for r in rows)
+    placed, accepted = rows[1]["data"], rows[2]["data"]
+    assert placed["escrow"] == {"b": {"A1": 10}} and placed["available"]["b"] == 90 and placed["credits"]["b"] == 100
+    assert accepted["reserved"] == {"A1": "ord-1"} and accepted["open_orders"] == ["ord-1"]
+    rows = [rows[0]] + rows[3:]  # the rest as before the order steps
 
     start, ex = rows[0]["data"], rows[1]["data"]
     assert start["holdings"] == {"a": ["A1", "A2"], "b": ["B1"], "c": []}
     assert start["owners"]["A1"] == ["a"] and start["total_credits"] == 260
     assert ex["owners"]["A1"] == ["b"] and ex["holdings"]["a"] == ["A2"]  # moved, not copied
     assert ex["known"]["a"] == ["A1", "A2"] and ex["credits"] == {"a": 110, "b": 90, "c": 60}
+    assert ex["escrow"] == {} and ex["reserved"] == {} and ex["open_orders"] == []
     assert rows[1]["agent_id"] == "b" and ex["seller"] == "a" and ex["token"] == "A1"
     assert rows[2]["data"]["credits"]["c"] == 58  # message burned 2
     assert rows[3]["data"]["completed"] == ["b"] and rows[3]["data"]["submissions"]["b"] == 1
@@ -220,29 +241,35 @@ async def test_graph_state_logged_after_every_change(tmp_path):
 async def test_failed_resale_is_flagged_in_log(tmp_path):
     b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    await b.buy("b", "A1", "a")
-    await b.buy("c", "A1", "b")  # b passes A1 on
+    await trade(b, "b", "A1", "a")
+    await trade(b, "c", "A1", "b")  # b passes A1 on
     with pytest.raises(MarketError) as e:  # b no longer has A1 to sell to a
-        await b.buy("a", "A1", "b")
+        await trade(b, "a", "A1", "b")
     assert e.value.code == "seller_lacks_token" and "previously" not in e.value.message  # agents see nothing extra
     with pytest.raises(MarketError):  # b never had A2: a plain failure, not a resale
-        await b.buy("c", "A2", "b")
-    fails = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "buy_failed"]
+        await trade(b, "c", "A2", "b")
+    events = read_jsonl(tmp_path / "m.jsonl")
+    fails = [e["data"] for e in events if e["kind"] == "order_failed"]
+    assert [f["stage"] for f in fails] == ["accept", "accept"]
     assert fails[0]["seller_previously_held"] is True and fails[0]["current_holders"] == ["c"]
     assert fails[1]["reason"] == "seller_lacks_token" and fails[1]["seller_previously_held"] is False
-    # No new state row for a failed buy: the state didn't change.
-    rows = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "graph_state"]
-    assert [r["cause"] for r in rows] == ["round_start", "exchange", "exchange"]
+    # The buyer's side records it too, when the order is placed (observer-only).
+    placed = [e["data"] for e in events if e["kind"] == "order_placed"]
+    assert [(p["seller_holds"], p["seller_previously_held"]) for p in placed[2:]] == [(False, True), (False, False)]
+    # No state row for the failed accept itself: the state didn't change.
+    rows = [e["data"] for e in events if e["kind"] == "graph_state"]
+    assert [r["cause"] for r in rows if r["cause"] not in ("order_placed", "order_accepted", "order_declined")] == \
+        ["round_start", "exchange", "exchange"]
 
 
 async def test_passing_a_token_back_is_allowed(tmp_path):
     b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    await b.buy("b", "A1", "a")
-    await b.buy("a", "A1", "b")  # back to its first holder (edge b -> a): a cycle, not an anomaly
+    await trade(b, "b", "A1", "a")
+    await trade(b, "a", "A1", "b")  # back to its first holder (edge b -> a): a cycle, not an anomaly
     assert b.holds["a"] == {"A1", "A2"} and "A1" not in b.holds["b"]
     kinds = [e["kind"] for e in read_jsonl(tmp_path / "m.jsonl")]
-    assert "buy_failed" not in kinds and "unexplained_knowledge" not in kinds
+    assert "order_failed" not in kinds and "unexplained_knowledge" not in kinds
 
 
 @pytest.mark.parametrize("edges", [
@@ -263,7 +290,7 @@ async def test_playing_the_ideal_plan_passes_at_exactly_ideal_cost(tmp_path, edg
         for x in plan["exchanges"]:
             if x["relay"]:  # the relay has to be asked to pass the token on: one message
                 await b.send_message(x["from"], x["to"], f"please buy {tok} from me and pass it on")
-            await b.buy(x["to"], tok, x["from"])
+            await trade(b, x["to"], tok, x["from"])
     for n in ("y", "z"):
         assert (await b.submit(n, answer(b, n)))["correct"]
     res = b.results[0]

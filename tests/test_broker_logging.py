@@ -83,6 +83,14 @@ class Market:
         response = self.client.request(method, path, headers=headers, **kw)
         return response, self.new_events()
 
+    def trade(self, buyer: str, token: str, seller: str) -> list[dict]:
+        """A full buy over HTTP (place, the seller accepts, commit); returns the events of all three steps."""
+        r, placed = self.call("POST", "/orders", buyer, json={"token": token, "seller": seller})
+        oid = r.json()["order_id"]
+        _, accepted = self.call("POST", "/orders/respond", seller, json={"order_id": oid, "accept": True})
+        _, committed = self.call("POST", "/orders/commit", buyer, json={"order_id": oid})
+        return placed + accepted + committed
+
 
 @contextmanager
 def running_market(tmp_path, mode="local", client_ip="testclient", **world_kw):
@@ -141,27 +149,59 @@ def test_reads_are_logged(market, path, action):
     assert http["data"]["response"] == r.json()
 
 
-def test_buy_is_logged_for_buyer_and_seller(market):
-    r, events = market.call("POST", "/buy", "b", json={"token": "A1", "seller": "a"})
-    assert r.status_code == 200
+def test_order_is_logged_at_every_step(market):
+    # 1. the buyer places the order: price escrowed, the seller notified
+    r, events = market.call("POST", "/orders", "b", json={"token": "A1", "seller": "a"})
+    assert r.status_code == 200 and r.json()["status"] == "pending"
+    oid = r.json()["order_id"]
+    placed = one(events, "order_placed")
+    assert placed["agent_id"] == "b" and placed["data"]["escrowed"] == 10 and placed["data"]["seller_holds"] is True
+    assert one(events, "graph_state")["data"]["escrow"] == {"b": {"A1": 10}}
+    notice = one(events, "notice")
+    assert notice["agent_id"] == "a" and notice["data"]["event"] == "order_placed" and notice["data"]["order_id"] == oid
+    http = one(events, "http_request")["data"]
+    assert http["action"] == "place_order" and http["request"] == {"token": "A1", "seller": "a"}
+
+    # 2. the seller accepts: the token is reserved, the buyer notified
+    r, events = market.call("POST", "/orders/respond", "a", json={"order_id": oid, "accept": True})
+    assert r.json()["status"] == "accepted"
+    assert one(events, "order_accepted")["agent_id"] == "a"
+    assert one(events, "graph_state")["data"]["reserved"] == {"A1": oid}
+    assert one(events, "notice")["agent_id"] == "b" and one(events, "http_request")["data"]["action"] == "respond_to_order"
+
+    # 3. the buyer commits: the transfer, the ledger, and the seller's side of the trade
+    r, events = market.call("POST", "/orders/commit", "b", json={"order_id": oid})
+    assert r.status_code == 200 and r.json()["content"] == market.broker.contents["A1"]
+    assert one(events, "order_committed")["data"]["order_id"] == oid
     exchange = one(events, "exchange")
     assert exchange["agent_id"] == "b"
-    assert {k: exchange["data"][k] for k in ("round", "buyer", "seller", "token", "cost", "relay")} == \
-        {"round": 1, "buyer": "b", "seller": "a", "token": "A1", "cost": 10, "relay": False}
+    assert {k: exchange["data"][k] for k in ("round", "buyer", "seller", "token", "cost", "relay", "order_id")} == \
+        {"round": 1, "buyer": "b", "seller": "a", "token": "A1", "cost": 10, "relay": False, "order_id": oid}
     balances = one(events, "balances")["data"]
     assert balances["cause"] == "exchange" and balances["deltas"] == {"b": -10, "a": 10}
     sale = one(events, "notice")  # the seller's side of the trade
-    assert sale["agent_id"] == "a"
+    assert sale["agent_id"] == "a" and sale["data"]["body"].startswith("Transaction complete")
     assert {k: sale["data"][k] for k in ("event", "token", "buyer", "cost")} == \
         {"event": "sale", "token": "A1", "buyer": "b", "cost": 10}
-    http = one(events, "http_request")["data"]
-    assert http["action"] == "buy" and http["request"] == {"token": "A1", "seller": "a"} and http["status"] == 200
+    assert one(events, "http_request")["data"]["action"] == "commit_order"
 
     # b sells on what it bought: a relay, and b is now the seller told about it
-    r, events = market.call("POST", "/buy", "c", json={"token": "A1", "seller": "b"})
-    assert r.status_code == 200
+    events = market.trade("c", "A1", "b")
     assert one(events, "exchange")["data"]["relay"] is True
+    assert [n["agent_id"] for n in events if n["kind"] == "notice"] == ["b", "c", "b"]
+
+
+def test_cancel_and_decline_are_logged(market):
+    r, _ = market.call("POST", "/orders", "c", json=BUY_B1)
+    r, events = market.call("POST", "/orders/respond", "b", json={"order_id": r.json()["order_id"], "accept": False})
+    assert one(events, "order_declined")["agent_id"] == "b" and one(events, "notice")["agent_id"] == "c"
+    r, _ = market.call("POST", "/orders", "c", json=BUY_B1)
+    oid = r.json()["order_id"]
+    r, events = market.call("POST", "/orders/cancel", "c", json={"order_id": oid})
+    cancelled = one(events, "order_cancelled")["data"]
+    assert cancelled["by"] == "buyer" and cancelled["was"] == "pending"
     assert one(events, "notice")["agent_id"] == "b"
+    assert one(events, "graph_state")["data"]["escrow"] == {}
 
 
 def test_messages_are_logged_with_cost_and_leaks(market):
@@ -228,23 +268,59 @@ def c_out_of_submissions(m):
         m.call("POST", "/submit", "c", json={"answer": "wrong"})
 
 
+def c_ordered_a1_from_b(m):
+    m.call("POST", "/orders", "c", json={"token": "A1", "seller": "b"})  # ord-1; b doesn't hold A1
+
+
+def c_ordered_b1(m):
+    m.call("POST", "/orders", "c", json=BUY_B1)  # ord-1
+
+
+def b_accepted_c(m):
+    c_ordered_b1(m)
+    m.call("POST", "/orders/respond", "b", json={"order_id": "ord-1", "accept": True})
+
+
+def b_declined_c(m):
+    c_ordered_b1(m)
+    m.call("POST", "/orders/respond", "b", json={"order_id": "ord-1", "accept": False})
+
+
 BUY_B1 = {"token": "B1", "seller": "b"}
 HI_A = {"to": "a", "body": "hi"}
+ORD1 = {"order_id": "ord-1"}
+ACCEPT1 = {"order_id": "ord-1", "accept": True}
 # setup, agent, method, path, body, status, reason, older event that also covers the case
 REJECTIONS = [
-    pytest.param(None, "c", "POST", "/buy", {"token": "A1", "seller": "zed"}, 404, "unknown_seller", "buy_failed",
-                 id="buy-unknown-seller"),
-    pytest.param(None, "a", "POST", "/buy", {"token": "A1", "seller": "b"}, 400, "already_held", "buy_failed",
-                 id="buy-already-held"),
-    pytest.param(None, "c", "POST", "/buy", {"token": "A1", "seller": "a"}, 403, "no_edge", "buy_failed",
-                 id="buy-no-edge"),
-    pytest.param(None, "c", "POST", "/buy", {"token": "A1", "seller": "b"}, 409, "seller_lacks_token", "buy_failed",
-                 id="buy-seller-lacks-token"),
-    pytest.param(low_credits, "c", "POST", "/buy", BUY_B1, 402, "insufficient_credits", "buy_failed",
-                 id="buy-insufficient-credits"),
-    pytest.param(round_over, "c", "POST", "/buy", BUY_B1, 409, "round_over", None, id="buy-round-over"),
-    pytest.param(market_closed, "c", "POST", "/buy", BUY_B1, 410, "market_closed", None, id="buy-market-closed"),
-    pytest.param(None, "ghost", "POST", "/buy", BUY_B1, 404, "unknown_agent", None, id="buy-unknown-agent"),
+    pytest.param(None, "c", "POST", "/orders", {"token": "A1", "seller": "zed"}, 404, "unknown_seller",
+                 "order_failed", id="order-unknown-seller"),
+    pytest.param(None, "a", "POST", "/orders", {"token": "A1", "seller": "b"}, 400, "already_held", "order_failed",
+                 id="order-already-held"),
+    pytest.param(None, "c", "POST", "/orders", {"token": "A1", "seller": "a"}, 403, "no_edge", "order_failed",
+                 id="order-no-edge"),
+    pytest.param(None, "c", "POST", "/orders", {"token": "ZZ", "seller": "b"}, 404, "unknown_token", "order_failed",
+                 id="order-unknown-token"),
+    pytest.param(low_credits, "c", "POST", "/orders", BUY_B1, 402, "insufficient_credits", "order_failed",
+                 id="order-insufficient-credits"),
+    pytest.param(c_ordered_b1, "c", "POST", "/orders", BUY_B1, 409, "duplicate_order", "order_failed",
+                 id="order-duplicate"),
+    pytest.param(round_over, "c", "POST", "/orders", BUY_B1, 409, "round_over", None, id="order-round-over"),
+    pytest.param(market_closed, "c", "POST", "/orders", BUY_B1, 410, "market_closed", None, id="order-market-closed"),
+    pytest.param(None, "ghost", "POST", "/orders", BUY_B1, 404, "unknown_agent", None, id="order-unknown-agent"),
+    pytest.param(c_ordered_a1_from_b, "b", "POST", "/orders/respond", ACCEPT1, 409, "seller_lacks_token",
+                 "order_failed", id="accept-seller-lacks-token"),
+    pytest.param(None, "b", "POST", "/orders/respond", ACCEPT1, 404, "unknown_order", "order_failed",
+                 id="respond-unknown-order"),
+    pytest.param(c_ordered_b1, "a", "POST", "/orders/respond", ACCEPT1, 403, "not_your_order", "order_failed",
+                 id="respond-not-the-seller"),
+    pytest.param(b_accepted_c, "b", "POST", "/orders/respond", ACCEPT1, 409, "order_not_pending", "order_failed",
+                 id="respond-twice"),
+    pytest.param(c_ordered_b1, "c", "POST", "/orders/commit", ORD1, 409, "order_not_accepted", "order_failed",
+                 id="commit-before-accept"),
+    pytest.param(b_accepted_c, "b", "POST", "/orders/commit", ORD1, 403, "not_your_order", "order_failed",
+                 id="commit-not-the-buyer"),
+    pytest.param(b_declined_c, "c", "POST", "/orders/cancel", ORD1, 409, "order_closed", "order_failed",
+                 id="cancel-closed-order"),
     pytest.param(low_credits, "c", "POST", "/messages", HI_A, 402, "insufficient_credits", "message_failed",
                  id="message-insufficient-credits"),
     pytest.param(None, "c", "POST", "/messages", {"to": "zed", "body": "hi"}, 404, "unknown_agent", None,
@@ -287,10 +363,10 @@ def test_every_rejected_action_is_logged(market, setup, agent, method, path, bod
 
 
 def test_malformed_requests_are_logged(market):
-    r, events = market.call("POST", "/buy", "b", json={"token": "A1"})
+    r, events = market.call("POST", "/orders", "b", json={"token": "A1"})
     assert r.status_code == 422
     invalid = one(events, "invalid_request")
-    assert invalid["agent_id"] == "b" and invalid["data"]["path"] == "/buy" and invalid["data"]["status"] == 422
+    assert invalid["agent_id"] == "b" and invalid["data"]["path"] == "/orders" and invalid["data"]["status"] == 422
     assert invalid["data"]["body"] == {"token": "A1"}
     assert ["body", "seller"] in [e["loc"] for e in invalid["data"]["errors"]]
 
@@ -299,7 +375,8 @@ def test_malformed_requests_are_logged(market):
     assert one(events, "invalid_request")["data"]["query"] == "since=abc"
 
 
-@pytest.mark.parametrize("method, path, status", [("POST", "/transfer", 404), ("GET", "/buy", 405)])
+@pytest.mark.parametrize("method, path, status", [("POST", "/transfer", 404), ("GET", "/orders", 405),
+                                                  ("POST", "/buy", 404)])  # plain buy is gone (#21)
 def test_unrouted_requests_are_logged(market, method, path, status):
     """An agent guessing endpoints or methods leaves a trace too."""
     r, events = market.call(method, path, "c")
@@ -311,11 +388,11 @@ def test_unrouted_requests_are_logged(market, method, path, status):
 
 def test_unauthenticated_requests_are_logged(market):
     for token in (None, "forged"):
-        r, events = market.call("POST", "/buy", token=token, json=BUY_B1)
+        r, events = market.call("POST", "/orders", token=token, json=BUY_B1)
         assert r.status_code == 401
         http = one(events, "http_request")
         assert http["agent_id"] is None and http["data"]["status"] == 401
-        assert one(events, "unauthenticated_request")["data"]["path"] == "/buy"
+        assert one(events, "unauthenticated_request")["data"]["path"] == "/orders"
 
 
 def test_identity_mismatch_and_source_attribution(tmp_path):
@@ -354,9 +431,9 @@ def test_admin_calls_are_audited(market):
 
 def test_passing_round_ends_game(tmp_path):
     with running_market(tmp_path, rounds=1) as m:
-        m.call("POST", "/buy", "b", json={"token": "A1", "seller": "a"})
-        m.call("POST", "/buy", "c", json={"token": "A1", "seller": "b"})
-        m.call("POST", "/buy", "c", json=BUY_B1)
+        m.trade("b", "A1", "a")
+        m.trade("c", "A1", "b")
+        m.trade("c", "B1", "b")
         m.call("POST", "/submit", "b", json={"answer": answer(m.broker, "b")})
         r, events = m.call("POST", "/submit", "c", json={"answer": answer(m.broker, "c")})
         assert r.json()["correct"] is True
@@ -383,22 +460,24 @@ def test_timeout_is_logged(tmp_path):
 
 # ------------------------------------------------------- a full run with scripted agents
 
-MARKET_TOOLS = {"get_status": "status", "view_graph": "view_graph", "buy": "buy", "send_message": "send_message",
-                "submit_answer": "submit", "declare_stuck": "declare_stuck"}
+MARKET_TOOLS = {"get_status": "status", "view_graph": "view_graph", "place_order": "place_order",
+                "respond_to_order": "respond_to_order", "commit_order": "commit_order", "cancel_order": "cancel_order",
+                "send_message": "send_message", "submit_answer": "submit", "declare_stuck": "declare_stuck"}
 
 
 async def test_scripted_run_logs_every_broker_action(tmp_path):
     """Every broker call the agents made is in the broker log, and every sale reached the seller's side.
 
-    Refusals are not exercised here (these scripted agents never make a refused call);
-    test_every_rejected_action_is_logged covers them.
+    Refused calls are counted like any other (scripted sellers try to accept orders for tokens
+    they don't hold, then decline); test_every_rejected_action_is_logged covers each refusal.
     """
     run_dir = create_run(EXPERIMENTS / "local_fail.yaml", tmp_path, mode="local", local_base_port=19800)
     await run_local(run_dir)
     market = read_jsonl(run_dir / "logs" / "market.jsonl")
     calls = [e for e in read_jsonl(run_dir / "logs" / "agent_traces.jsonl")
              if e["kind"] == "tool_call" and e["data"]["name"] in MARKET_TOOLS]
-    assert {c["data"]["name"] for c in calls} >= {"buy", "submit_answer", "declare_stuck"}
+    assert {c["data"]["name"] for c in calls} >= {"place_order", "respond_to_order", "commit_order",
+                                                  "submit_answer", "declare_stuck"}
 
     for agent in {c["agent_id"] for c in calls}:
         for tool, action in MARKET_TOOLS.items():

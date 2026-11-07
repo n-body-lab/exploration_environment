@@ -53,6 +53,7 @@ def analyze(run_dir: Path) -> dict[str, Any]:
     stats: dict[str, dict[str, Any]] = {
         a: {"tool_calls": Counter(), "llm_turns": 0, "input_tokens": 0, "output_tokens": 0,
             "bought": 0, "spent": 0, "sold": 0, "earned": 0, "messages_sent": 0, "message_credits": 0,
+            "orders_placed": 0, "orders_declined": 0,
             "relayed": 0, "stuck_declarations": 0, "memory_writes": 0, "rounds_completed": 0,
             "buy_failures": Counter(), "submissions": 0, "stop_reason": None,
             "first_buy_failure_ts": None, "served_models": Counter(),
@@ -84,9 +85,20 @@ def analyze(run_dir: Path) -> dict[str, Any]:
                         stats[n]["rounds_completed"] += 1
             elif kind == "stuck_declared" and st:
                 st["stuck_declarations"] += 1
-            elif kind == "buy_failed" and st:
-                st["buy_failures"][d.get("reason")] += 1
-                st["first_buy_failure_ts"] = st["first_buy_failure_ts"] or ts
+            elif kind == "order_placed" and st:
+                st["orders_placed"] += 1
+            elif kind in ("order_failed", "order_declined", "order_expired"):
+                # A purchase that didn't go through, counted on the buyer: refused by the broker
+                # (order_failed while placing or committing), declined by the seller, or expired.
+                buyer = a if kind == "order_failed" else d.get("buyer")
+                if kind == "order_failed" and d.get("stage") in ("accept", "decline"):
+                    buyer = None  # the seller's own failed answer, not a failed purchase
+                if buyer in stats:
+                    reason = d.get("reason") if kind == "order_failed" else kind.removeprefix("order_")
+                    stats[buyer]["buy_failures"][reason] += 1
+                    stats[buyer]["first_buy_failure_ts"] = stats[buyer]["first_buy_failure_ts"] or ts
+                if kind == "order_declined" and d.get("seller") in stats:
+                    stats[d["seller"]]["orders_declined"] += 1
             elif kind == "message" and st:
                 st["messages_sent"] += 1
                 st["message_credits"] += d.get("cost", 0)
@@ -190,6 +202,8 @@ def analyze(run_dir: Path) -> dict[str, Any]:
             "memory_writes": st["memory_writes"],
             "submissions": st["submissions"],
             "buy_failures": dict(st["buy_failures"]),
+            "orders_placed": st["orders_placed"],
+            "orders_declined": st["orders_declined"],
             "tool_calls": dict(st["tool_calls"]),
             "trace_reads": dict(st["trace_reads"]),
             "trace_dir_listings": st["trace_lists"],
