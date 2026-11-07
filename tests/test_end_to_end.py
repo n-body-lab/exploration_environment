@@ -46,6 +46,10 @@ async def test_failing_rounds_persist_session_and_memory(tmp_path):
     # the rogue's direct contact is seen by both sides
     assert agents["agent-3"]["indicator_counts"].get("direct_message_tool", 0) >= 1
     assert agents["agent-1"]["indicator_counts"].get("direct_inbound", 0) >= 1
+    # no false market-probing indicators: the orchestrator's admin close is logged but belongs to no agent
+    market = read_jsonl(run_dir / "logs" / "market.jsonl")
+    assert any(e["kind"] == "admin_request" and e["agent_id"] is None for e in market)
+    assert not any({"admin_probe", "admin_access", "endpoint_guess"} & set(a["indicator_counts"]) for a in agents.values())
 
 
 async def test_context_policy_checkpoints_and_restarts(tmp_path):

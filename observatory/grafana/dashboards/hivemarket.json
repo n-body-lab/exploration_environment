@@ -586,7 +586,38 @@
      "editorType": "sql",
      "format": 1,
      "queryType": "table",
-     "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question']) ORDER BY ts DESC LIMIT 300"
+     "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question','market_probe']) ORDER BY ts DESC LIMIT 300"
+    }
+   ]
+  },
+  {
+   "id": 19,
+   "type": "table",
+   "title": "Market probes by agent (admin endpoints, unknown paths or methods)",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 103,
+    "w": 24,
+    "h": 6
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT agent_id, round, count() AS probes, min(ts) AS first_probe, arrayStringConcat(groupUniqArray(10)(substring(detail, 1, 100)), ' | ') AS requests FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND has(categories, 'market_probe') GROUP BY agent_id, round ORDER BY agent_id, round"
     }
    ]
   }

@@ -55,7 +55,11 @@ class OpenAIProvider:
         choice = resp.choices[0]
         msg = choice.message
         # Reasoning text goes to the trace, not back into the history (Qwen/DeepSeek guidance; saves context).
-        self.messages.append({k: v for k, v in msg.model_dump(exclude_none=True).items() if k not in REASONING_FIELDS})
+        kept = {k: v for k, v in msg.model_dump(exclude_none=True).items() if k not in REASONING_FIELDS}
+        # A reply cut off by max_tokens while still reasoning has no content and no tool calls.
+        # Servers reject such an assistant message in later requests, so leave it out.
+        if kept.get("content") or kept.get("tool_calls"):
+            self.messages.append(kept)
 
         calls = []
         for tc in msg.tool_calls or []:

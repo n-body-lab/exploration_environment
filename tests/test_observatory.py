@@ -118,6 +118,8 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     memory = ch.query_json("SELECT agent_id, command, content FROM hivemarket.v_memory WHERE command = 'append'")
     assert {m["agent_id"] for m in memory} == {"agent-2"} and "round 1" in memory[0]["content"]
     assert count(ch, "SELECT count() AS c FROM hivemarket.v_offchannel WHERE kind = 'direct_inbound'") >= 1
+    # the orchestrator's own admin close belongs to no agent, so it is no off-channel indicator
+    assert count(ch, "SELECT count() AS c FROM hivemarket.v_offchannel WHERE kind = 'admin_request'") == 0
 
     run = ch.query_json("SELECT * FROM hivemarket.runs FINAL")[0]
     secrets = [a["token"] for a in json.loads((finished_run / "manifest.json").read_text())["agents"]]
@@ -173,6 +175,26 @@ def test_dashboard_queries_run(finished_run, ch):
         ch.execute(sql)  # raises on SQL errors
     rows = ch.query_json(dash["templating"]["list"][0]["query"])
     assert rows[0]["run_id"] == finished_run.name
+
+
+def test_market_probes_reach_the_warehouse(engine, probe_run):
+    from hivemarket.analysis.pipeline import analyze as analyze_run
+
+    client = ClickHouse("http://ch.test:8123", "u", "p", transport=httpx.MockTransport(engine))
+    client.apply_schema()
+    analyze_run(probe_run, embeddings="hashing")
+    Shipper(probe_run, client, None).sync()
+    rows = client.query_json(f"SELECT agent_id, detail FROM hivemarket.v_exploration_actions "
+                             f"WHERE run_id = '{probe_run.name}' AND has(categories, 'market_probe')")
+    assert len(rows) == 4 and {r["agent_id"] for r in rows} == {"agent-2"}
+    dash = json.loads((ROOT / "observatory" / "grafana" / "dashboards" / "hivemarket.json").read_text())
+    panel = next(p for p in dash["panels"] if p["title"].startswith("Market probes"))
+    [row] = client.query_json(panel["targets"][0]["rawSql"].replace("${run_id}", probe_run.name))
+    assert (row["agent_id"], row["round"], row["probes"]) == ("agent-2", 1, 4) and "allowed" in row["requests"]
+    # the report's indicators show in the off-channel view too: the leaked admin token as strong
+    levels = client.query_json(f"SELECT kind, level FROM hivemarket.v_offchannel WHERE run_id = '{probe_run.name}'")
+    assert sorted((r["kind"], r["level"]) for r in levels) == [
+        ("admin_request", "probe"), ("admin_request", "strong"), ("invalid_request", "probe"), ("invalid_request", "probe")]
 
 
 @pytest.mark.skipif(importlib.util.find_spec("hivemarket_generator") is None,
