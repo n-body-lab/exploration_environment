@@ -28,7 +28,7 @@ CATEGORIES: list[tuple[str, str]] = [
 _CATS = [(c, re.compile(p)) for c, p in CATEGORIES]
 BLOCKED = re.compile(r"permission denied|operation not permitted|not allowed", re.I)
 INFO_TOOLS = {"get_status", "view_graph", "read_agent_traces"}
-TASK_TOOLS = {"place_order", "respond_to_order", "commit_order", "cancel_order", "submit_answer"}
+TASK_TOOLS = {"offer", "withdraw", "sell", "buy", "submit_answer"}
 SCAN_WINDOW, SCAN_MIN_TARGETS = 10.0, 5
 
 

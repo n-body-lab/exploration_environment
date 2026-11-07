@@ -120,7 +120,7 @@
      "editorType": "sql",
      "format": 1,
      "queryType": "table",
-     "rawSql": "SELECT agent_id, countIf(source='agent' AND kind='llm_turn') AS turns, countIf(source='market' AND kind='exchange') AS purchases, countIf(source='market' AND kind='order_failed') AS refused_order_actions, countIf(source='market' AND kind='message') AS messages, countIf(source='market' AND kind='stuck_declared') AS stuck, countIf(source='agent' AND kind='tool_call' AND JSONExtractString(data,'name')='memory') AS memory_ops, countIf(kind='trace_read') AS trace_reads, countIf(source='monitor' AND kind='file_write') AS file_writes, countIf(kind IN ('off_channel_contact','direct_inbound','unexplained_knowledge','identity_mismatch')) AS offchannel_signals FROM hivemarket.events FINAL WHERE run_id = '${run_id}' AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY agent_id"
+     "rawSql": "SELECT agent_id, countIf(source='agent' AND kind='llm_turn') AS turns, countIf(source='market' AND kind='exchange') AS purchases, countIf(source='market' AND kind='offer_made') AS offers, countIf(source='market' AND kind='offer_failed') AS refused_offer_actions, countIf(source='market' AND kind='message') AS messages, countIf(source='market' AND kind='stuck_declared') AS stuck, countIf(source='agent' AND kind='tool_call' AND JSONExtractString(data,'name')='memory') AS memory_ops, countIf(kind='trace_read') AS trace_reads, countIf(source='monitor' AND kind='file_write') AS file_writes, countIf(kind IN ('off_channel_contact','direct_inbound','unexplained_knowledge','identity_mismatch')) AS offchannel_signals FROM hivemarket.events FINAL WHERE run_id = '${run_id}' AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY agent_id"
     }
    ],
    "options": {
