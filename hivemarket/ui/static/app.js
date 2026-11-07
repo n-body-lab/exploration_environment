@@ -14,7 +14,7 @@
   const S = {
     runId: null, meta: null, es: null,
     events: [], ids: new Set(), market: [], alerts: [], sources: new Set(), hiddenSources: new Set(),
-    live: true, viewT: Infinity, playing: false, speed: 5, expanded: new Set(), dirty: true,
+    live: true, viewT: Infinity, playing: false, speed: 5, expanded: new Set(), dirty: true, userScrolledLog: false,
   };
 
   // ------------------------------------------------------------------ helpers
@@ -69,7 +69,8 @@
   async function openRun(id) {
     if (S.es) S.es.close();
     Object.assign(S, { runId: id, events: [], ids: new Set(), market: [], alerts: [], sources: new Set(),
-                       live: true, viewT: Infinity, playing: false, expanded: new Set(), dirty: true });
+                       live: true, viewT: Infinity, playing: false, expanded: new Set(), dirty: true,
+                       userScrolledLog: false });
     history.replaceState(null, "", "#" + encodeURIComponent(id));
     S.meta = await (await fetch(`/api/runs/${encodeURIComponent(id)}`)).json();
     const status = $("status");
@@ -323,18 +324,19 @@
       box.textContent = txt; box.hidden = false; banner.textContent = "BACKCHANNEL"; banner.hidden = false;
     } else { box.hidden = true; banner.hidden = true; }
     const ol = $("alerts");
-    if (!list.length) { ol.replaceChildren(el("li", { class: "empty", text: "No off-channel activity seen." })); return; }
+    const anchor = scrollAnchor(ol); { ol.replaceChildren(el("li", { class: "empty", text: "No off-channel activity seen." })); return; }
     ol.replaceChildren(...list.slice(-300).map(a => {
-      const li = el("li", { class: a.ts > t ? "future" : null, title: "Jump to this moment" },
+      const li = el("li", { "data-id": a.event_id, class: a.ts > t ? "future" : null, title: "Jump to this moment" },
         el("div", {}, el("span", { class: "lvl " + a.level, text: a.level }),
            el("span", { class: "mono", text: fmt(a.ts) + "  " }),
            el("span", { class: "who", text: `${a.from || "?"} → ${a.to || "?"}${a.port ? " :" + a.port : ""}` }),
            a.established === false ? el("span", { class: "obs", text: "  refused" }) : null),
         a.detail ? el("div", { class: "detail", text: a.detail }) : null,
         a.observers && a.observers.length ? el("div", { class: "obs", text: "seen by " + a.observers.join(", ") }) : null);
-      li.addEventListener("click", () => { S.viewT = a.ts + 0.001; setLive(false); });
+      li.addEventListener("click", () => { S.viewT = a.ts + 0.001; S.userScrolledLog = false; setLive(false); });
       return li;
     }));
+    restoreScroll(ol, anchor);
   }
 
   // --------------------------------------------------------------------- log
@@ -345,10 +347,28 @@
       return el("label", {}, cb, el("span", { class: "src " + src, text: src }));
     }));
   }
+  // Where the reader is in a scrolling box: at the bottom, or which row is at the top and how far down.
+  function scrollAnchor(box) {
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    let id = null, delta = 0;
+    for (const row of box.querySelectorAll("[data-id]")) {
+      if (row.offsetTop + row.offsetHeight > box.scrollTop) { id = row.dataset.id; delta = row.offsetTop - box.scrollTop; break; }
+    }
+    return { atBottom, id, delta, top: box.scrollTop };
+  }
+  // Put the box back where the reader was after its contents were rebuilt. Only this box scrolls:
+  // never scrollIntoView, which would also move the page.
+  function restoreScroll(box, anchor) {
+    const row = anchor.id && box.querySelector(`[data-id="${CSS.escape(anchor.id)}"]`);
+    box.scrollTop = row ? row.offsetTop - anchor.delta : anchor.top;
+  }
+
   function renderLog() {
     const agent = $("agent-filter").value, q = $("search").value.trim().toLowerCase();
     const noise = $("hide-noise").checked, t = viewTime();
     const alertIds = new Set(S.alerts.map(a => a.event_id));
+    const wrap = $("log-wrap");
+    const anchor = scrollAnchor(wrap);
     const rows = [];
     let matched = 0;
     for (let i = S.events.length - 1; i >= 0 && rows.length < MAX_ROWS; i--) {
@@ -362,7 +382,8 @@
     rows.reverse();
     const body = el("tbody");
     for (const [e, sum] of rows) {
-      const tr = el("tr", { class: [e.ts > t ? "future" : "", alertIds.has(e.event_id) ? "alert" : ""].join(" ").trim() || null },
+      const tr = el("tr", { "data-id": e.event_id,
+                            class: [e.ts > t ? "future" : "", alertIds.has(e.event_id) ? "alert" : ""].join(" ").trim() || null },
         el("td", { class: "t", text: fmt(e.ts) }), el("td", {}, el("span", { class: "src " + e.source, text: e.source })),
         el("td", { text: e.agent_id || "" }), el("td", { text: e.kind }), el("td", { class: "sum", text: sum }));
       tr.addEventListener("click", () => { S.expanded.has(e.event_id) ? S.expanded.delete(e.event_id) : S.expanded.add(e.event_id); S.dirty = true; });
@@ -373,13 +394,15 @@
     }
     $("log").replaceChildren(body);
     $("log-count").textContent = `${matched}${matched >= MAX_ROWS ? "+" : ""} shown of ${S.events.length}`;
-    if ($("follow").checked) {
-      const wrap = $("log-wrap");
-      if (S.live) wrap.scrollTop = wrap.scrollHeight;
-      else {
-        const last = [...body.querySelectorAll("tr:not(.future)")].pop();
-        if (last) last.scrollIntoView({ block: "nearest" });
-      }
+    const follow = $("follow").checked;
+    if (follow && S.live && anchor.atBottom) {
+      wrap.scrollTop = wrap.scrollHeight; // following, and the reader is at the bottom: stay there
+    } else if (follow && !S.live && !S.userScrolledLog) {
+      // replay: keep the current moment (the last row that has happened) near the middle of the box
+      const now = [...body.querySelectorAll("tr[data-id]:not(.future)")].pop();
+      if (now) wrap.scrollTop = Math.max(0, now.offsetTop - wrap.clientHeight / 2);
+    } else {
+      restoreScroll(wrap, anchor); // the reader scrolled away: keep what they're reading in place
     }
   }
 
@@ -414,6 +437,11 @@
     requestAnimationFrame(frame);
   }
   setInterval(redraw, 250);
+
+  $("log-wrap").addEventListener("wheel", () => { S.userScrolledLog = true; }, { passive: true });
+  $("log-wrap").addEventListener("touchmove", () => { S.userScrolledLog = true; }, { passive: true });
+  $("scrub").addEventListener("input", () => { S.userScrolledLog = false; });
+  $("follow").addEventListener("change", () => { S.userScrolledLog = false; if ($("follow").checked) $("log-wrap").scrollTop = $("log-wrap").scrollHeight; });
 
   for (const id of ["agent-filter", "hide-noise", "follow", "show-probes"]) $(id).addEventListener("change", () => { S.dirty = true; });
   $("search").addEventListener("input", () => { S.dirty = true; });
