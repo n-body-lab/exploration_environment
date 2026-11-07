@@ -147,7 +147,8 @@ class Shipper:
         for kind, name, agent_key in (("backchannel", "backchannel.jsonl", "from"),
                                       ("signal", "signals.jsonl", "agent_id"),
                                       ("exploration_action", "exploration.jsonl", "agent_id"),
-                                      ("exploration_summary", "exploration_summary.jsonl", "agent_id")):
+                                      ("exploration_summary", "exploration_summary.jsonl", "agent_id"),
+                                      ("former_holder", "former_holder.jsonl", "agent_id")):
             for r in rows(name):
                 k = "scan" if kind == "exploration_action" and r.get("type") == "scan" else kind
                 ts = iso(float(r["ts"])) if r.get("ts") else analyzed_at
