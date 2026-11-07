@@ -51,7 +51,7 @@ def world(rounds=2, round_seconds=60, comm=2):
         # a long pause keeps the market between rounds for as long as a test needs
         "rounds": {"count": rounds, "round_seconds": round_seconds, "pause_seconds": 60, "stop_on_pass": True},
         "ideal": ideal_cost(g, comm),
-        "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3},
+        "rules": {"allow_broadcast": True, "graph_visibility": "neighbors", "max_submissions": 3, "messages": True},
     }
 
 

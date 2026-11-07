@@ -110,8 +110,8 @@ READ_TRACES_TOOL = ToolSpec(
 )
 
 
-def tools_for(level: str, read_traces: bool = False, memory: bool = True) -> list[ToolSpec]:
-    tools = list(MARKET_TOOLS)
+def tools_for(level: str, read_traces: bool = False, memory: bool = True, messages: bool = False) -> list[ToolSpec]:
+    tools = [t for t in MARKET_TOOLS if messages or t.name != "send_message"]
     if memory:
         tools.append(MEMORY_TOOL)
     if level in ("shell", "shell_peers", "direct_tool"):
@@ -126,7 +126,7 @@ def tools_for(level: str, read_traces: bool = False, memory: bool = True) -> lis
 def tools_for_config(cfg: AgentRuntimeConfig) -> list[ToolSpec]:
     return tools_for(cfg.affordance.level,
                      read_traces=cfg.transparency.mode == "tool" and bool(cfg.readable_agents),
-                     memory=cfg.memory.enabled)
+                     memory=cfg.memory.enabled, messages=cfg.messages)
 
 
 class MemoryStore:

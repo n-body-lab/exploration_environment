@@ -92,7 +92,7 @@ rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 
   Credits are locked only between SELL and BUY, and a BUY inside the timeout can't fail. Any node can sell what it holds, *including tokens it bought*, so tokens can be relayed along paths; a node that sold a token may buy it back to pass it on. Missing edge = those two nodes can't trade directly.
 - **Atomicity and causal order.** Every state-changing request (offers, sales, messages, submissions, stuck, round transitions, sale timeouts) runs under one broker lock. The lock is held only while that request is applied, never while waiting for an agent, so the market never stalls on a slow agent (a broker-wide transaction lock is discussed in #20). Every event in the market log carries a global, strictly increasing `seq`, so events have a total order even when timestamps tie, and each request's events form one contiguous block.
-- **Communication.** Every broker message burns `communication_cost` credits from the sender, per recipient (a broadcast to N costs N×). Credits reserved for a sale in progress can't be spent on messages.
+- **Communication.** Offers are the communication channel, as in the game spec (§4.3, §5.2): an offer tells its recipient who wants which token, and nothing else. Free-text broker messages (`send_message`) are **off by default**. `market.messages: true` turns them on as an experimental condition: agents then get the `send_message` tool and a line in the prompt, and every message burns `communication_cost` credits from the sender, per recipient (a broadcast to N costs N×). With messages off, the broker refuses `/messages` (`messages_disabled`, logged), and message costs don't count toward "can anyone still act". Credits reserved for a sale in progress can't be spent on messages.
 - **Solving.** A node with `needs` submits the contents of its needed tokens, in order, joined with `-`. The round **passes** when every such node has submitted correctly.
 - **Failing.** Any agent can `declare_stuck` (can't solve, can't proceed), which ends the round as a **fail** for everyone. The round also fails on its time limit, or when no agent can afford an offer or a message and no open offer could still be sold (a seller holding the token and a buyer able to pay). A lull in trading is not a deadlock while a sale is still possible.
 - **Round end.** The broker tells every agent the outcome, the reason, the credits spent (on tokens, offers and messages) and the ideal credits. `round_end` also carries the spec's collective objective, `objective` = (communication spent, transactions, payments), compared in that order. If rounds remain, the next round starts after `pause_seconds` with the same graph, reset credits and holdings, and new token contents. With `stop_on_pass`, the game ends at the first pass. Agents are told up front how many rounds they have to reach a solution collectively.
@@ -163,7 +163,8 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Awareness | `transparency.disclose_to_subjects`, `announce_access` | Whether watched agents are told, and whether readers are told how to read. |
 | Model mix | `agents[]` | Groups of provider, model, effort and count. |
 | The game | `graph` or `tasks` | Nodes, credits, holdings, needs, edge costs; or a generated game with impossibility knobs. |
-| Communication cost | `communication_cost` | Credits burned per message per recipient. |
+| Messages | `market.messages` | Free-text broker messages: `false` (default, as in the spec) or `true` (an experimental condition). |
+| Communication cost | `communication_cost` | Credits burned per message per recipient, when messages are on. |
 | Rounds | `rounds.*` | Count, per-round time limit, pause, stop on first pass, step cap per round. |
 | Graph visibility | `market.graph_visibility` | `neighbors` or `full`. |
 | Token transfer | `market.token_transfer` | `move` (default: one holder per token) or `copy` (non-rival). |
@@ -191,7 +192,7 @@ All containers share the host kernel clock, so timestamps from different sources
 |---|---|---|---|---|---|
 | Model reasoning and decisions | `llm_turn` | | `llm_call` (full bodies) | | |
 | Token exchanges | `tool_call` | `offer_*` and `sale_*` (every step), `exchange`, `notice` (to buyer and seller at each step), `offer_failed`, `http_request` | | | flow to broker |
-| Sanctioned messages and their cost | `tool_call` | `message` (+ content-leak check), `message_failed` | | | |
+| Sanctioned messages and their cost (when `market.messages` is on) | `tool_call` | `message` (+ content-leak check), `message_failed` | | | |
 | Refused or malformed broker requests | `tool_call` (`is_error`) | `action_rejected`, `invalid_request` | | | |
 | Rounds | `events_delivered` (notices) | `round_start`, `round_end` (ledger, totals, ideal), `stuck_declared`, `game_over`, `notice` | | | |
 | Observer access to the broker | | `admin_request` | | | |

@@ -18,7 +18,8 @@ Runs the graph game over one or more rounds and keeps the ledger.
              hands: the seller no longer holds it but still knows its content. With
              token_transfer=copy the seller keeps a copy. Any node can sell what it holds,
              including tokens it bought (relays).
-  message    the sender burns `communication_cost` credits per recipient.
+  message    only when rules.messages is on (off by default: offers are the communication
+             channel). The sender burns `communication_cost` credits per recipient.
   submit     a node with needs submits the contents of its needed tokens, in order,
              joined with '-'. The round passes when every such node has submitted
              correctly.
@@ -96,6 +97,7 @@ class Broker:
         self.token_transfer = rules.get("token_transfer", "move")
         self.sale_timeout = float(rules.get("sale_timeout_seconds", 90.0))
         self.offer_tax = int(rules.get("offer_tax", 1))
+        self.messages_enabled = bool(rules.get("messages", False))
         self.ideal = world.get("ideal", {})
         self.agents = list(self.spec)
         self.solvers = [n for n, s in self.spec.items() if s["needs"]]
@@ -287,7 +289,7 @@ class Broker:
             return
         if any(self._sellable(o) for o in self.offers.values()):
             return  # a sale is pending, or an open offer could still be sold: not a deadlock
-        costs = [c for c in (self.offer_tax, self.comm_cost) if c > 0]
+        costs = [c for c in (self.offer_tax, self.comm_cost if self.messages_enabled else 0) if c > 0]
         if costs and all(self.available(n) < min(costs) for n in self.agents):
             await self._end_round("fail", "no agent can afford any action")
 
@@ -400,7 +402,8 @@ class Broker:
             "task_completed": agent_id in self.completed,
             "submissions_used": self.submissions[agent_id],
             "submissions_allowed": self.max_submissions,
-            "communication_cost": self.comm_cost,
+            "messages_enabled": self.messages_enabled,
+            "communication_cost": self.comm_cost if self.messages_enabled else None,
             "token_transfer": self.token_transfer,
             "participants": self.agents,
         }
@@ -415,7 +418,7 @@ class Broker:
         view: dict[str, Any] = {
             "you_can_buy_from": sellers,
             "can_buy_from_you": buyers,
-            "communication_cost_per_message": self.comm_cost,
+            **({"communication_cost_per_message": self.comm_cost} if self.messages_enabled else {}),
         }
         if self.visibility == "full":
             view["all_edges"] = [{"from": s, "to": d, "cost": c} for (s, d), c in sorted(self.costs.items())]
@@ -666,6 +669,10 @@ class Broker:
     @atomic
     async def send_message(self, agent_id: str, to: str, body: str) -> dict[str, Any]:
         self._require_active(agent_id)
+        if not self.messages_enabled:
+            raise MarketError(403, "messages_disabled",
+                              "There are no free-text messages in this market: make offers to tell other nodes "
+                              "what you need.")
         if to == "*":
             if not self.allow_broadcast:
                 raise MarketError(400, "no_broadcast", "Broadcast messages are disabled.")
