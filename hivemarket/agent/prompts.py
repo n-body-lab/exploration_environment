@@ -104,6 +104,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "participants": ", ".join(p for p in status.get("participants", []) if p != cfg.agent_id),
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost", 0),
+        "order_timeout": int(status.get("order_timeout_seconds", 90)),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
         "rules": rules_text(cfg),
         "context_note": context_text(cfg),

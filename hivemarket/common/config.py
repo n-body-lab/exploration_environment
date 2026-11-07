@@ -197,6 +197,9 @@ class MarketConfig(BaseModel):
     # move: a sale transfers the token, so the seller no longer holds (or can resell) it but still
     # knows its content. copy: the seller keeps a copy (non-rival tokens; the original behaviour).
     token_transfer: Literal["move", "copy"] = "move"
+    # Buy orders (two-phase commit): how long a seller has to answer an order, and then how
+    # long the buyer has to commit an accepted one, before the broker expires it.
+    order_timeout_seconds: float = Field(90.0, gt=0)
 
 
 class MemoryConfig(BaseModel):

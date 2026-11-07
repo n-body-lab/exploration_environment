@@ -3,7 +3,9 @@
 events     one row per event from every source, the common envelope; `data` is the JSON payload.
            ReplacingMergeTree on (run_id, ts, event_id) makes re-ingesting a run harmless.
            Market events of note: round_start, balances (every agent's credits after each change),
-           graph_state (full market state after each change), exchange, message, buy_failed, submission,
+           graph_state (full market state after each change), order_placed / order_accepted /
+           order_declined / order_committed / order_cancelled / order_expired / order_aborted,
+           order_failed, exchange, message, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
@@ -107,9 +109,31 @@ STATEMENTS = [
            JSONExtractString(data, 'seller') AS seller,
            JSONExtractString(data, 'token') AS token,
            JSONExtractInt(data, 'cost') AS cost,
-           JSONExtractBool(data, 'relay') AS relay
+           JSONExtractBool(data, 'relay') AS relay,
+           JSONExtractString(data, 'order_id') AS order_id
     FROM {DATABASE}.events FINAL
     WHERE source = 'market' AND kind = 'exchange'
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_orders AS
+    SELECT run_id,
+           JSONExtractString(data, 'order_id') AS order_id,
+           any(JSONExtractUInt(data, 'round')) AS round,
+           any(JSONExtractString(data, 'buyer')) AS buyer,
+           any(JSONExtractString(data, 'seller')) AS seller,
+           any(JSONExtractString(data, 'token')) AS token,
+           anyIf(JSONExtractInt(data, 'price'), kind = 'order_placed') AS price,
+           argMax(replaceOne(kind, 'order_', ''), JSONExtractUInt(data, 'seq')) AS final_status,
+           minIf(ts, kind = 'order_placed') AS placed_at,
+           minIf(ts, kind = 'order_accepted') AS accepted_at,
+           max(ts) AS closed_at,
+           anyIf(JSONExtractBool(data, 'seller_holds'), kind = 'order_placed') AS seller_held_token,
+           anyIf(JSONExtractBool(data, 'seller_previously_held'), kind = 'order_placed') AS seller_previously_held,
+           anyIf(JSONExtractString(data, 'reason'), kind = 'order_cancelled') AS cancel_reason
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind IN ('order_placed', 'order_accepted', 'order_declined', 'order_committed',
+                                         'order_cancelled', 'order_expired', 'order_aborted')
+    GROUP BY run_id, order_id
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_messages AS

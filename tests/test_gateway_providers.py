@@ -88,7 +88,7 @@ async def test_anthropic_through_gateway(gateway):
     assert body["fallbacks"] == "default"
     assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert body["output_config"] == {"effort": "high"}
-    assert {t["name"] for t in body["tools"]} >= {"buy", "bash"}
+    assert {t["name"] for t in body["tools"]} >= {"place_order", "commit_order", "bash"}
 
     # history is append-only and the thinking block is echoed back unchanged
     p.add_tool_results([ToolResult("toolu_1", "ok")], "[New events] hi")

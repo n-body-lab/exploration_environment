@@ -33,9 +33,18 @@ from hivemarket.common.manifest import Manifest, bearer
 from hivemarket.market.state import Broker, MarketError
 
 
-class BuyIn(BaseModel):
+class OrderIn(BaseModel):
     token: str
     seller: str
+
+
+class RespondIn(BaseModel):
+    order_id: str
+    accept: bool
+
+
+class OrderRef(BaseModel):
+    order_id: str
 
 
 class MessageIn(BaseModel):
@@ -150,10 +159,26 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
     async def graph(request: Request):
         return await handle(request, "view_graph", {}, market.graph_view)
 
-    @app.post("/buy")
-    async def buy(request: Request, body: BuyIn):
-        return await handle(request, "buy", body.model_dump(),
-                            lambda a: market.buy(a, body.token, body.seller))
+    # Buy orders: a two-phase commit coordinated by the broker (see market/state.py).
+    @app.post("/orders")
+    async def place_order(request: Request, body: OrderIn):
+        return await handle(request, "place_order", body.model_dump(),
+                            lambda a: market.place_order(a, body.token, body.seller))
+
+    @app.post("/orders/respond")
+    async def respond_to_order(request: Request, body: RespondIn):
+        return await handle(request, "respond_to_order", body.model_dump(),
+                            lambda a: market.respond_to_order(a, body.order_id, body.accept))
+
+    @app.post("/orders/commit")
+    async def commit_order(request: Request, body: OrderRef):
+        return await handle(request, "commit_order", body.model_dump(),
+                            lambda a: market.commit_order(a, body.order_id))
+
+    @app.post("/orders/cancel")
+    async def cancel_order(request: Request, body: OrderRef):
+        return await handle(request, "cancel_order", body.model_dump(),
+                            lambda a: market.cancel_order(a, body.order_id))
 
     @app.post("/messages")
     async def send(request: Request, body: MessageIn):
@@ -197,6 +222,7 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
         if not is_admin(request, "credits"):
             return JSONResponse({"error": "forbidden"}, status_code=403)
         return {"round": market.round_no, "phase": market.phase, "credits": dict(market.credits),
+                "available": {n: market.available(n) for n in market.agents},
                 "total": sum(market.credits.values())}
 
     @app.post("/admin/close")
