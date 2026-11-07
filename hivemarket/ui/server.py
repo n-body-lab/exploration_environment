@@ -11,6 +11,10 @@ machine. It reads the runs' JSONL logs directly, so it works while a run is goin
   GET /api/runs/{id}/stream        Server-Sent Events: every event of every log file,
                                    backlog first, then new lines as they are written
   GET /api/runs/{id}/backchannel   the post-run backchannel reconstruction, if any
+  GET /api/observatory             whether ClickHouse and Grafana are up, and Grafana's URL
+  GET /api/sql/schema              warehouse tables and their columns
+  GET /api/sql/examples            starting queries ({run_id} = the selected run)
+  POST /api/sql                    a read-only query on the warehouse (see warehouse.py)
 
 The page shows everything an experimenter can see, including private memory and
 token contents, so the server binds to 127.0.0.1 by default. Agent containers sit on
@@ -27,8 +31,12 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from hivemarket.ui.warehouse import EXAMPLES, QueryError, Warehouse
 
 STATIC = Path(__file__).parent / "static"
 RUN_ID = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -122,8 +130,14 @@ def run_info(run_dir: Path) -> dict[str, Any] | None:
     }
 
 
-def create_app(runs_dir: Path) -> FastAPI:
+class SqlIn(BaseModel):
+    sql: str
+    limit: int = 1000
+
+
+def create_app(runs_dir: Path, warehouse: Warehouse | None = None) -> FastAPI:
     runs_dir = Path(runs_dir)
+    warehouse = warehouse or Warehouse()
     app = FastAPI(title="HiveMarket observer", docs_url=None, redoc_url=None)
 
     def run_dir(run_id: str) -> Path:
@@ -185,6 +199,30 @@ def create_app(runs_dir: Path) -> FastAPI:
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ------------------------------------------------------- observatory (history)
+
+    @app.get("/api/observatory")
+    async def observatory() -> dict[str, Any]:
+        return await run_in_threadpool(warehouse.status)
+
+    @app.get("/api/sql/examples")
+    async def examples() -> list[dict[str, str]]:
+        return [{"title": t, "sql": q} for t, q in EXAMPLES]
+
+    @app.get("/api/sql/schema")
+    async def schema() -> JSONResponse:
+        try:
+            return JSONResponse(await run_in_threadpool(warehouse.schema))
+        except QueryError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/sql")
+    async def sql(body: SqlIn) -> JSONResponse:
+        try:
+            return JSONResponse(await run_in_threadpool(warehouse.query, body.sql, body.limit))
+        except QueryError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

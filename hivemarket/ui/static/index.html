@@ -33,7 +33,14 @@
   <button id="live" class="on" title="Follow the newest events">Live</button>
 </section>
 
-<main>
+<nav id="tabs">
+  <button data-tab="live" class="tab on">Live</button>
+  <button data-tab="charts" class="tab">Charts (Grafana)</button>
+  <button data-tab="sql" class="tab">SQL (ClickHouse)</button>
+  <span id="obs-status" class="meta"></span>
+</nav>
+
+<main id="tab-live">
   <section class="panel" id="graph-panel">
     <div class="panel-head">
       <h2>Market</h2>
@@ -76,6 +83,37 @@
     <div id="log-wrap"><table id="log"><tbody></tbody></table></div>
   </section>
 </main>
+
+<section id="tab-charts" class="tabpage" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>HiveMarket run dashboard</h2>
+      <span id="charts-note" class="meta"></span>
+      <span class="spacer"></span>
+      <a id="charts-open" target="_blank" rel="noopener">Open in Grafana ↗</a>
+    </div>
+    <iframe id="charts" title="Grafana dashboard"></iframe>
+  </div>
+</section>
+
+<section id="tab-sql" class="tabpage" hidden>
+  <aside class="panel" id="sql-side">
+    <div class="panel-head"><h2>Tables &amp; views</h2></div>
+    <div id="schema" class="schema"></div>
+  </aside>
+  <div class="panel" id="sql-main">
+    <div class="panel-head">
+      <select id="examples"><option value="">Example queries…</option></select>
+      <span class="meta">{run_id} = the selected run · read-only · Ctrl/⌘+Enter runs</span>
+      <span class="spacer"></span>
+      <label class="small">rows <input id="sql-limit" type="number" value="1000" min="1" max="5000"></label>
+      <button id="sql-run" class="on">Run</button>
+    </div>
+    <textarea id="sql" spellcheck="false" rows="8"></textarea>
+    <div id="sql-status" class="meta sql-status"></div>
+    <div id="sql-wrap"><table id="sql-result"></table></div>
+  </div>
+</section>
 
 <script src="/static/model.js"></script>
 <script src="/static/app.js"></script>
