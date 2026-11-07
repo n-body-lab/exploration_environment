@@ -217,7 +217,7 @@ async def test_graph_state_logged_after_every_change(tmp_path):
     assert end["phase"] == "between" and end["outcome"] == "fail"
 
 
-async def test_failed_resale_is_flagged_in_log(tmp_path):
+async def test_buy_from_former_holder_is_flagged_in_log(tmp_path):
     b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
     await b.buy("b", "A1", "a")
@@ -225,7 +225,7 @@ async def test_failed_resale_is_flagged_in_log(tmp_path):
     with pytest.raises(MarketError) as e:  # b no longer has A1 to sell to a
         await b.buy("a", "A1", "b")
     assert e.value.code == "seller_lacks_token" and "previously" not in e.value.message  # agents see nothing extra
-    with pytest.raises(MarketError):  # b never had A2: a plain failure, not a resale
+    with pytest.raises(MarketError):  # b never had A2: a plain failure, not a former holder
         await b.buy("c", "A2", "b")
     fails = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "buy_failed"]
     assert fails[0]["seller_previously_held"] is True and fails[0]["current_holders"] == ["c"]

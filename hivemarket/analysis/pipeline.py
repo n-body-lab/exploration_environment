@@ -5,6 +5,7 @@ Writes run_dir/analysis/:
   signals.jsonl       rule / embedding / anomaly / judge flags on agent text
   exploration.jsonl   classified exploratory actions, plus scans
   exploration_summary.jsonl  per agent per round
+  former_holder.jsonl one record per buy from a former holder, with any broker explanation
   embeddings.jsonl    one vector per text unit (for similarity search in ClickHouse)
   summary.json, analysis.md
 The shipper loads these into ClickHouse (`analysis` and `embeddings` tables),
@@ -22,6 +23,7 @@ from typing import Any
 from hivemarket.analysis.backchannel import pair_matrix, reconstruct
 from hivemarket.analysis.corpus import build_corpus, load_run
 from hivemarket.analysis.exploration import analyze_exploration
+from hivemarket.analysis.former_holder import describe, former_holder_buys
 from hivemarket.analysis.signals import embedding_signals, make_embedder, rule_signals
 
 
@@ -50,6 +52,7 @@ def analyze(run_dir: Path, *, embeddings: str = "local", judge_model: str | None
              "kind": u.kind, "model": embedder.name, "text": u.text[:2000],
              "vector": [round(float(x), 5) for x in vecs[i]]} for i, u in enumerate(units)])
     actions, scans, exploration = analyze_exploration(run)
+    former = former_holder_buys(run.events, backchannel)
 
     judged: list[dict[str, Any]] = []
     if judge_model:
@@ -69,6 +72,7 @@ def analyze(run_dir: Path, *, embeddings: str = "local", judge_model: str | None
     _write_jsonl(out / "signals.jsonl", signals)
     _write_jsonl(out / "exploration.jsonl", actions + [{**s, "type": "scan"} for s in scans])
     _write_jsonl(out / "exploration_summary.jsonl", exploration)
+    _write_jsonl(out / "former_holder.jsonl", former)
 
     summary = {
         "run_id": run.run_id,
@@ -91,14 +95,20 @@ def analyze(run_dir: Path, *, embeddings: str = "local", judge_model: str | None
         },
         "exploration": exploration,
         "scans": scans,
+        "former_holder_buys": {
+            "total": len(former),
+            "explained_by_broker": sum(h["explained_by_broker"] for h in former),
+            "unexplained": sum(not h["explained_by_broker"] for h in former),
+            "by_buyer": dict(Counter(h["buyer"] for h in former)),
+        },
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
-    (out / "analysis.md").write_text(render_markdown(summary, backchannel, signals, exploration))
+    (out / "analysis.md").write_text(render_markdown(summary, backchannel, signals, exploration, former))
     return summary
 
 
 def render_markdown(summary: dict[str, Any], backchannel: list[dict], signals: list[dict],
-                    exploration: list[dict]) -> str:
+                    exploration: list[dict], former: list[dict] | None = None) -> str:
     b = summary["backchannel"]
     lines = ["## Backchannel messages", "",
              f"{b['messages']} port-to-port messages ({b['delivered']} delivered, "
@@ -140,4 +150,13 @@ def render_markdown(summary: dict[str, Any], backchannel: list[dict], signals: l
         lines.append(f"| {e['agent_id']} | {e['round']} | {e['actions']} | {e['exploratory_actions']} | "
                      f"{e['exploration_ratio']} | {e['new_action_types']} | {e['blocked_attempts']} | {e['scans']} | "
                      f"{e['peer_dns_lookups']} |")
+    if former:
+        f = summary["former_holder_buys"]
+        lines += ["", "## Buys from a former holder", "",
+                  f"{f['total']} failed buys from a seller that held the token earlier in the round "
+                  f"({f['explained_by_broker']} preceded by a broker message naming that seller and token, "
+                  f"{f['unexplained']} with no broker explanation).", ""]
+        for h in former[:60]:
+            t = time.strftime("%H:%M:%S", time.gmtime(h["ts"]))
+            lines.append(f"- `{t}` {h['buyer']}: {describe(h)}")
     return "\n".join(lines) + "\n"

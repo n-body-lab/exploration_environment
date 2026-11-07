@@ -130,6 +130,18 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     assert count(ch, "SELECT count() AS c FROM hivemarket.artifacts FINAL") == len(keys)
 
 
+def test_graph_state_view_in_state_seq_order(finished_run, ch):
+    Shipper(finished_run, ch, None).finish()
+    rows = ch.query_json(f"SELECT state_seq, round, cause, credits, owners FROM hivemarket.v_graph_state "
+                         f"WHERE run_id = '{finished_run.name}'")  # no ORDER BY: the view orders by state_seq
+    logged = [e["data"] for e in map(json.loads, open(finished_run / "logs" / "market.jsonl"))
+              if e["kind"] == "graph_state"]
+    assert [r["state_seq"] for r in rows] == list(range(1, len(logged) + 1))
+    assert [(r["round"], r["cause"]) for r in rows] == [(d["round"], d["cause"]) for d in logged]
+    assert rows[0]["cause"] == "round_start" and rows[0]["credits"] == logged[0]["credits"]
+    assert rows[-1]["owners"] == logged[-1]["owners"]
+
+
 def test_analysis_loads_and_replaces(finished_run, ch):
     from hivemarket.analysis.pipeline import analyze
 

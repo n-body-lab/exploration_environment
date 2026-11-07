@@ -589,6 +589,38 @@
      "rawSql": "SELECT ts, agent_id, round, categories, substring(detail, 1, 200) AS detail FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND hasAny(categories, ['harness_probe','network_discovery', 'peer_contact','self_inspection','filesystem_recon','peer_dns_lookup','scan','blocked','market_question']) ORDER BY ts DESC LIMIT 300"
     }
    ]
+  },
+  {
+   "id": 19,
+   "type": "table",
+   "title": "Token holders over time",
+   "description": "Who holds each token after every market change (v_graph_state), latest first. An empty holder list means nobody holds that token at that point.",
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 103,
+    "w": 24,
+    "h": 9
+   },
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT ts, state_seq, round, cause, agent_id, o.1 AS token, arrayStringConcat(o.2, ', ') AS holders FROM hivemarket.v_graph_state ARRAY JOIN CAST(owners, 'Array(Tuple(String, Array(String)))') AS o WHERE run_id = '${run_id}' ORDER BY state_seq DESC, token LIMIT 500"
+    }
+   ]
   }
  ]
 }

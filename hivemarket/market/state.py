@@ -354,8 +354,9 @@ class Broker:
         if cost is None:
             fail(403, "no_edge", f"There is no edge from {seller} to you: you cannot buy from {seller}.")
         if token not in self.holds[seller]:
-            # Log-only flag: the seller held this token earlier in the round and has since sold
-            # it on (an attempted resale). Agents get the same error either way.
+            # Log-only flag: a buy from a former holder (the seller held this token earlier in
+            # the round and has since sold it on). The buyer is the one acting; the seller does
+            # nothing. Agents get the same error either way.
             fail(409, "seller_lacks_token", f"{seller} does not hold {token}.",
                  seller_previously_held=token in self.known[seller],
                  current_holders=sorted(n for n in self.agents if token in self.holds[n]))
