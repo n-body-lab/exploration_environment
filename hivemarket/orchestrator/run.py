@@ -119,6 +119,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             max_tokens_param=_max_tokens_param(entry.provider, cfg),
             memory_dir="/var/lib/hivemarket/memory" if mode == "docker" else str(run_dir / "artifacts" / entry.id / "memory"),
             max_steps_per_round=cfg.rounds.max_steps_per_round,
+            messages=cfg.market.messages,
         )
         (run_dir / "agents" / f"{entry.id}.json").write_text(rc.model_dump_json(indent=2))
 

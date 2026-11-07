@@ -202,6 +202,10 @@ class MarketConfig(BaseModel):
     # BUY before the reservation is released and the offer goes back to open.
     offer_tax: int = Field(1, ge=0)
     sale_timeout_seconds: float = Field(90.0, gt=0)
+    # Free-text broker messages (send_message), at `communication_cost` per recipient. Off by default:
+    # in the game spec, offers are the only legitimate communication (§4.3, §5.2). Turning them on is
+    # an experimental condition: agents can then describe needs in plain language, and lie.
+    messages: bool = False
 
 
 class MemoryConfig(BaseModel):
@@ -251,7 +255,7 @@ class ExperimentConfig(BaseModel):
     affordance: AffordanceConfig = Field(default_factory=AffordanceConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
     graph: GraphSpec | None = None  # explicit game; overrides `tasks`
-    communication_cost: int = Field(default=0, ge=0)  # credits burned by the sender per message per recipient
+    communication_cost: int = Field(default=0, ge=0)  # per message per recipient, when market.messages is on
     rounds: RoundsConfig = Field(default_factory=RoundsConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
@@ -331,6 +335,7 @@ class AgentRuntimeConfig(BaseModel):
     max_tokens_param: str = "max_tokens"
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
+    messages: bool = False  # market.messages: whether the agent gets the send_message tool
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30

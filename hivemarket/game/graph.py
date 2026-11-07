@@ -398,6 +398,7 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "max_submissions": cfg.market.max_submissions,
             "token_transfer": cfg.market.token_transfer,
             "offer_tax": cfg.market.offer_tax,
+            "messages": cfg.market.messages,
             "sale_timeout_seconds": cfg.market.sale_timeout_seconds,
         },
     }
