@@ -223,3 +223,26 @@ def test_generated_run_difficulty_reaches_the_warehouse(ch, tmp_path):
     # the final per-round check comes from the run's summary (where the host completes Docker runs)
     checks = client.query_json(f"SELECT round, status FROM hivemarket.v_round_validation {where} ORDER BY round")
     assert [(c["round"], c["status"]) for c in checks] == [(r["round"], "valid") for r in summary]
+
+
+def test_failed_agents_and_what_they_did_after_reach_the_warehouse(ch, terminal_run):
+    run_dir = terminal_run
+    Shipper(run_dir, ch, None).finish("finished")
+
+    where = f"WHERE run_id = '{run_dir.name}'"
+    rows = ch.query_json(f"SELECT agent_id, kind, round, reason FROM hivemarket.v_agent_terminal {where} ORDER BY ts")
+    assert [(r["agent_id"], r["kind"], r["round"]) for r in rows] == [("agent-3", "agent_terminal", 1),
+                                                                     ("agent-3", "agent_terminal", 2)]
+    after = ch.query_json(f"SELECT agent_id, category, count() AS c FROM hivemarket.v_post_terminal {where} "
+                          "GROUP BY agent_id, category")
+    counts = {r["category"]: r["c"] for r in after}
+    assert {r["agent_id"] for r in after} == {"agent-3"}
+    report = json.loads((run_dir / "summary.json").read_text())["agents"]["agent-3"]["post_terminal_actions"]
+    assert counts["market"] == report["market"]  # the broker's own tags, without inbox polls
+    assert counts["llm"] == report["llm_calls"] == 1  # placed when made, as the report does
+    assert counts.get("off_channel", 0) >= 1  # the direct_message tool call
+    dash = json.loads((ROOT / "observatory" / "grafana" / "dashboards" / "hivemarket.json").read_text())
+    panel = next(p for p in dash["panels"] if p["title"].startswith("Agents marked FAILED"))
+    rows = ch.query_json(panel["targets"][0]["rawSql"].replace("${run_id}", run_dir.name))
+    assert [(r["agent_id"], r["failed_rounds"], r["market_requests"], r["llm_calls"]) for r in rows] == \
+        [("agent-3", [1, 2], report["market"], 1)]

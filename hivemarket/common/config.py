@@ -17,11 +17,11 @@ from pydantic import BaseModel, Field, model_validator
 AffordanceLevel = Literal["none", "shell", "shell_peers", "direct_tool"]
 
 # How an agent's session carries across rounds (an experimental condition; see hivemarket/agent/runtime.py).
-#   fresh      - a new session every round: no earlier conversation, no summaries, no memory tool
-#   memory     - one session for the whole experiment: the conversation continues into the next round
-#   reflection - as memory, and at each round end the agent reflects on the result; the reflection
-#                stays in its session for the next round
-SessionMode = Literal["fresh", "memory", "reflection"]
+#   fresh  - a new session every round: no earlier conversation, no summaries, no memory tool
+#   memory - one session for the whole experiment: the conversation continues into the next round
+# Whether agents reflect at round end is separate: rounds.reflection (a reflection carries over
+# only in `memory`).
+SessionMode = Literal["fresh", "memory"]
 
 
 class AgentSpec(BaseModel):
@@ -230,6 +230,14 @@ class RoundsConfig(BaseModel):
     pause_seconds: float = 5  # between rounds
     stop_on_pass: bool = True
     max_steps_per_round: int | None = None  # LLM calls per agent per round; default spec.max_steps
+    # End a round early, as a fail, once no agent can act (nobody can afford an offer or a message,
+    # submit an answer it knows, or take part in a sale that could go through). false: it runs to
+    # round_seconds, so what agents do after they can no longer act stays observable.
+    end_on_deadlock: bool = True
+    # The broker's round-end message asks each agent to reflect (prompts/reflection.md), and the
+    # runtime gives it one turn with tools off (round_reflection). It stays in the conversation
+    # only under session: memory.
+    reflection: bool = False
 
 
 class ExecutionFee(BaseModel):
@@ -301,7 +309,7 @@ class ContextConfig(BaseModel):
     def _replaced(cls, data: Any) -> Any:
         if isinstance(data, dict) and "reset_each_round" in data:
             raise ValueError("context.reset_each_round was replaced by the experiment's `session` setting "
-                             "(fresh | memory | reflection)")
+                             "(fresh | memory)")
         return data
 
 
@@ -338,6 +346,14 @@ class ExperimentConfig(BaseModel):
     gateway_routes: dict[str, GatewayRoute] = Field(default_factory=dict)
     agent_resources: dict[str, str] = Field(default_factory=lambda: {"cpus": "1.0", "memory": "1g"})
 
+    @model_validator(mode="before")
+    @classmethod
+    def _replaced(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("session") == "reflection":
+            raise ValueError("session: reflection was replaced by rounds.reflection: true, which works with "
+                             "session: memory (the reflection carries over) or fresh (it doesn't)")
+        return data
+
     @model_validator(mode="after")
     def _check(self) -> "ExperimentConfig":
         total = sum(g.count for g in self.agents)
@@ -359,7 +375,7 @@ class ExperimentConfig(BaseModel):
         """Nothing carries across rounds in a fresh session, memory files included."""
         if "enabled" in self.memory.model_fields_set and self.memory.enabled:
             raise ValueError("session: fresh carries nothing across rounds, so it has no memory tool; "
-                             "remove memory.enabled or use session: memory | reflection")
+                             "remove memory.enabled or use session: memory")
         self.memory.enabled = False
 
     def _check_generated(self) -> None:
@@ -432,7 +448,7 @@ class AgentRuntimeConfig(BaseModel):
     peers: dict[str, str] = Field(default_factory=dict)  # agent_id -> host:port, only when disclosed
     prompt_template: str
     session: SessionMode = "memory"
-    reflection_template: str = ""  # session: reflection; prompts/reflection.md
+    reflection: bool = False  # rounds.reflection: reflect (tools off) on the broker's round-end message
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     max_tokens_param: str = "max_tokens"

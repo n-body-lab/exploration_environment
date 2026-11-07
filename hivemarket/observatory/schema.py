@@ -346,11 +346,12 @@ STATEMENTS = [
     FROM {DATABASE}.runs FINAL
     WHERE JSONHas(world, 'generated')
     """,
-    # Agent sessions across rounds (the experiment's `session`): the mode each agent ran under, and its
-    # round-end reflections (session: reflection), for comparing runs by condition.
+    # Agent sessions across rounds (the experiment's `session`): the mode each agent ran under, whether it
+    # reflected at round end (rounds.reflection), and its reflections, for comparing runs by condition.
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_agent_sessions AS
-    SELECT run_id, agent_id, JSONExtractString(data, 'session') AS session
+    SELECT run_id, agent_id, JSONExtractString(data, 'session') AS session,
+           JSONExtractBool(data, 'reflection') AS reflection
     FROM {DATABASE}.events FINAL
     WHERE source = 'agent' AND kind = 'runtime_start'
     """,
@@ -361,5 +362,72 @@ STATEMENTS = [
            JSONExtractString(data, 'text') AS text
     FROM {DATABASE}.events FINAL
     WHERE source = 'agent' AND kind = 'round_reflection'
+    """,
+    # Terminal agents (market/state.py): the broker's FAILED transitions, and everything an agent did while
+    # FAILED, by category: market (its requests, without inbox polls, the runtime's own calls or unauthenticated
+    # ones, which count as off_channel), shell (bash), off_channel (v_offchannel's kinds, without contacts it only
+    # received), llm (gateway calls; the runtime's turns for an agent whose calls don't go through the gateway)
+    # and other. Broker rows count by the broker's own tag (set when the request arrived) for the agent it
+    # names (`source_agent`, the machine a request came from in Docker mode, or else the row's agent); agent,
+    # gateway, collector and monitor rows are joined on the transitions (a new round clears every status), a
+    # tool or LLM call at the moment it was made. The report follows the same rule; its off-channel count also
+    # has the two indicators SQL can't see (peer DNS lookups, flows carrying token contents).
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_agent_terminal AS
+    SELECT run_id, ts, agent_id, kind,
+           JSONExtract(data, 'round', 'Nullable(UInt32)') AS round,
+           JSONExtractString(data, 'reason') AS reason,
+           JSONExtractInt(data, 'credits') AS credits,
+           JSONExtractInt(data, 'available') AS available,
+           JSONExtractArrayRaw(data, 'tokens_held') AS tokens_held
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind IN ('agent_terminal', 'agent_recovered')
+    """,
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_post_terminal AS
+    WITH transitions AS (
+        SELECT run_id, assumeNotNull(agent_id) AS agent, ts, toUInt8(kind = 'agent_terminal') AS failed
+        FROM {DATABASE}.events FINAL
+        WHERE source = 'market' AND kind IN ('agent_terminal', 'agent_recovered')
+        UNION ALL
+        SELECT r.run_id, a.agent, r.ts, toUInt8(0)
+        FROM (SELECT run_id, ts FROM {DATABASE}.events FINAL WHERE source = 'market' AND kind = 'round_start') AS r
+        INNER JOIN (SELECT DISTINCT run_id, assumeNotNull(agent_id) AS agent FROM {DATABASE}.events FINAL
+                    WHERE source = 'market' AND kind = 'agent_terminal') AS a ON r.run_id = a.run_id
+    )
+    SELECT run_id, ts, if(JSONExtractString(data, 'source_agent') != '', JSONExtractString(data, 'source_agent'),
+                          agent_id) AS agent_id, source, kind,
+           multiIf(kind = 'http_request', 'market',
+                   kind IN ('unexplained_knowledge', 'identity_mismatch', 'admin_request', 'unauthenticated_request')
+                   OR (kind = 'message' AND JSONLength(data, 'leaked_unheld') > 0)
+                   OR (kind = 'invalid_request' AND JSONExtractInt(data, 'status') IN (404, 405)), 'off_channel',
+                   'other') AS category,
+           JSONExtractFloat(data, 'since_terminal_s') AS since_terminal_s, data
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND JSONExtractBool(data, 'post_terminal')
+      AND NOT (kind = 'http_request' AND (JSONExtractString(data, 'action') = 'inbox'
+                                          OR JSONExtractString(data, 'origin') = 'runtime'
+                                          OR JSONExtractInt(data, 'status') = 401))  -- its unauthenticated_request counts
+    UNION ALL
+    SELECT e.run_id, e.ts, e.agent_id, e.source, e.kind,
+           multiIf(e.kind = 'tool_call' AND JSONExtractString(e.data, 'name') = 'bash', 'shell',
+                   (e.kind = 'tool_call' AND JSONExtractString(e.data, 'name') = 'direct_message')
+                   OR (e.kind = 'off_channel_contact' AND JSONExtractString(e.data, 'direction') = 'outbound')
+                   OR e.kind = 'unauthenticated_request', 'off_channel',
+                   (e.source = 'gateway' AND e.kind = 'llm_call')
+                   OR (e.source = 'agent' AND e.kind = 'llm_turn' AND (e.run_id, e.agent) NOT IN (
+                       SELECT run_id, assumeNotNull(agent_id) FROM {DATABASE}.events FINAL
+                       WHERE source = 'gateway' AND kind = 'llm_call' AND agent_id IS NOT NULL)), 'llm',
+                   'other') AS category,
+           dateDiff('microsecond', t.ts, e.made) / 1e6 AS since_terminal_s, e.data
+    FROM (SELECT run_id, ts, agent_id, assumeNotNull(agent_id) AS agent, source, kind, data,
+                 -- a tool or LLM call is logged when it returns: place it when it was made
+                 ts - toIntervalMicrosecond(toInt64(1000 * multiIf(
+                     kind = 'tool_call', JSONExtractFloat(data, 'duration_ms'),
+                     kind IN ('llm_call', 'llm_turn'), JSONExtractFloat(data, 'latency_ms'), 0))) AS made
+          FROM {DATABASE}.events FINAL
+          WHERE source IN ('agent', 'gateway', 'collector', 'monitor') AND agent_id IS NOT NULL) AS e
+    ASOF INNER JOIN transitions AS t ON e.run_id = t.run_id AND e.agent = t.agent AND e.made >= t.ts
+    WHERE t.failed = 1
     """,
 ]

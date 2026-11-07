@@ -9,6 +9,13 @@ and response bodies, status and latency. On top of that:
                     unknown path (404), wrong method (405)
   admin_request     every call to an observer endpoint, allowed or not
 
+Requests from an agent the broker has marked terminal (FAILED, see market/state.py) carry
+`post_terminal: true` and `since_terminal_s` on all of these (and on unauthenticated_request),
+as of when the request arrived. Here the agent is whoever made the request: the agent machine
+it came from (Docker mode), even with another agent's token or none, otherwise the token's agent
+(`source_agent` says which machine). Rows the broker logs for the action itself (state.py) are
+tagged for the token's agent, in whose name it recorded the action.
+
 Not logged: /health (the container healthcheck) and FastAPI's /openapi.json.
 """
 
@@ -86,6 +93,8 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
         token_agent = manifest.agent_by_token(bearer(request.headers))
         ip_agent = manifest.agent_by_ip(src_ip)
         agent_id = token_agent.id if token_agent else None
+        # Whoever made the request (see caller()), as of before the action, which may itself make it terminal.
+        tag = market.terminal_tag(ip_agent.id if ip_agent else agent_id)
 
         if token_agent is None:
             status, body = 401, {"error": "unauthorized", "message": "Missing or invalid agent token."}
@@ -93,7 +102,7 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             if manifest.enforce_source_ip and ip_agent and ip_agent.id != token_agent.id:
                 # A token is being used from another agent's machine.
                 log.emit("identity_mismatch", agent_id=agent_id, token_agent=agent_id,
-                         source_agent=ip_agent.id, source_ip=src_ip, action=action)
+                         source_agent=ip_agent.id, source_ip=src_ip, action=action, **tag)
             try:
                 result = fn(agent_id)
                 if asyncio.iscoroutine(result):
@@ -102,7 +111,8 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             except MarketError as e:
                 status, body = e.status, {"error": e.code, "message": e.message}
                 log.emit("action_rejected", agent_id=agent_id, action=action, round=market.round_no,
-                         status=e.status, reason=e.code, request=payload)
+                         status=e.status, reason=e.code, request=payload,
+                         source_agent=ip_agent.id if ip_agent else None, **tag)
 
         log.emit(
             "http_request",
@@ -119,10 +129,11 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
             user_agent=request.headers.get("user-agent"),
             origin=origin(request),
+            **tag,
         )
         if status == 401:
             log.emit("unauthenticated_request", agent_id=ip_agent.id if ip_agent else None,
-                     source_ip=src_ip, path=request.url.path)
+                     source_ip=src_ip, path=request.url.path, **tag)
         return JSONResponse(body if isinstance(body, (dict, list)) else {"result": body}, status_code=status)
 
     def caller(request: Request) -> tuple[str | None, str | None]:
@@ -138,7 +149,8 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
     def log_invalid(request: Request, status: int, **detail: Any) -> None:
         src_ip, agent_id = caller(request)
         log.emit("invalid_request", agent_id=agent_id, method=request.method, path=request.url.path,
-                 query=str(request.url.query), source_ip=src_ip, status=status, origin=origin(request), **detail)
+                 query=str(request.url.query), source_ip=src_ip, status=status, origin=origin(request),
+                 **market.terminal_tag(agent_id), **detail)
 
     # Requests that never reach a route: logged, then answered exactly as FastAPI would.
     @app.exception_handler(RequestValidationError)
@@ -209,7 +221,7 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
         allowed = bearer(request.headers) == manifest.admin_token
         src_ip, agent_id = caller(request)  # an agent probing observer endpoints is attributed to it
         log.emit("admin_request", agent_id=agent_id, action=action, method=request.method, path=request.url.path,
-                 allowed=allowed, source_ip=src_ip, origin=origin(request))
+                 allowed=allowed, source_ip=src_ip, origin=origin(request), **market.terminal_tag(agent_id))
         return allowed
 
     @app.get("/admin/state")

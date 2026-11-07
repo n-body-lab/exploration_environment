@@ -1,14 +1,19 @@
 """Fixtures shared by several test files."""
 
+import asyncio
+import json
 import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from hivemarket.common.events import read_jsonl
 from hivemarket.common.manifest import Manifest
 from hivemarket.market.__main__ import build
+from hivemarket.orchestrator.local import run_local
+from hivemarket.orchestrator.report import write_report
 from hivemarket.orchestrator.run import create_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,4 +47,33 @@ def probe_run(tmp_path) -> Path:
         assert client.post("/transfer", headers={**stolen, **by_tool}).status_code == 404
         assert client.get("/offers/buy", headers=as_agent).status_code == 405
         assert client.post("/offers/buy", headers=as_agent, json={"token": "A1"}).status_code == 422
+    return run_dir
+
+
+@pytest.fixture(scope="session")
+def terminal_run(tmp_path_factory) -> Path:
+    """A local run with scripted agents (experiments/local_fail.yaml) in which agent-3 is FAILED every round.
+
+    agent-3 (rogue) spends its only credit on an offer it then can't pay for, so the broker marks it terminal;
+    it then contacts a peer directly and declares stuck, both after it was marked. Scripted agents make no LLM
+    calls, so two of agent-3's are added to the gateway log as Docker runs would have them: one made after it
+    was FAILED in round 1, and one made just before (it returns after, so only its start time keeps it out).
+    The report is written.
+    """
+    tmp = tmp_path_factory.mktemp("terminal")
+    cfg = yaml.safe_load((ROOT / "experiments" / "local_fail.yaml").read_text())
+    cfg["graph"]["nodes"]["agent-3"]["credits"] = 1
+    cfg["graph"]["edges"][1]["cost"] = 1  # agent-2 -> agent-3: affordable to offer for, not to pay after the tax
+    exp = tmp / "terminal.yaml"
+    exp.write_text(yaml.safe_dump(cfg))
+    run_dir = create_run(exp, tmp / "runs", mode="local", local_base_port=20250)
+    asyncio.run(run_local(run_dir))
+
+    failed = next(e["ts"] for e in read_jsonl(run_dir / "logs" / "market.jsonl") if e["kind"] == "agent_terminal")
+    with open(run_dir / "logs" / "gateway.jsonl", "a") as f:
+        for i, (ts, latency_ms) in enumerate([(failed + 0.2, 100), (failed + 0.05, 200)]):
+            f.write(json.dumps({"event_id": f"gw-{i}", "run_id": run_dir.name, "ts": ts, "source": "gateway",
+                                "agent_id": "agent-3", "kind": "llm_call",
+                                "data": {"route": "anthropic", "status": 200, "latency_ms": latency_ms}}) + "\n")
+    write_report(run_dir)
     return run_dir

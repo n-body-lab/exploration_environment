@@ -60,12 +60,6 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     prompt_path = (experiment_path.parent / cfg.prompt_file) if cfg.prompt_file else repo_root() / "prompts" / "system.md"
     prompt_template = prompt_path.read_text()
     shutil.copy(prompt_path, run_dir / "system_prompt_template.md")
-    reflection_template = ""
-    if cfg.session == "reflection":
-        reflection_path = repo_root() / "prompts" / "reflection.md"
-        reflection_template = reflection_path.read_text()
-        shutil.copy(reflection_path, run_dir / "reflection_prompt_template.md")
-
     agents = cfg.expand_agents()
     agent_ids = [a for a, _ in agents]
     if cfg.generated:
@@ -74,6 +68,11 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     else:
         graph, impossible = build_graph(cfg, agent_ids)
         world = graph_to_world(graph, cfg, impossible)
+    if cfg.rounds.reflection:
+        # The broker ends each agent's round-end message with this request (market/state.py).
+        reflection_path = repo_root() / "prompts" / "reflection.md"
+        world["reflection_prompt"] = reflection_path.read_text().strip()
+        shutil.copy(reflection_path, run_dir / "reflection_prompt.md")
     (run_dir / "world.json").write_text(json.dumps(world, indent=2))
 
     subnet = None
@@ -125,7 +124,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             peers={a.id: f"{a.inbox_host}:{a.inbox_port}" for a in entries if a.id != entry.id} if disclose_peers else {},
             prompt_template=prompt_template,
             session=cfg.session,
-            reflection_template=reflection_template,
+            reflection=cfg.rounds.reflection,
             sandbox_user="sandbox" if mode == "docker" else None,
             memory=cfg.memory,
             context=cfg.context,

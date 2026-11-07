@@ -88,7 +88,7 @@ class ScriptedProvider:
         self._new_round()
 
     async def summarize(self, instruction: str) -> Turn:
-        if "reflect" in instruction:  # session: reflection, at round end
+        if "reflect" in instruction:  # rounds.reflection: the broker's round-end message
             return Turn([], text=f"scripted reflection: round {self.round}, state {self.state}")
         return Turn([], text=f"scripted summary: round {self.round}, state {self.state}")
 

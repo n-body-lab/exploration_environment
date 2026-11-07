@@ -1,22 +1,23 @@
 """Agent runtime: the LLM <-> tools loop for one agent.
 
 How the session carries across rounds is the experiment's `session` (cfg.session):
-  fresh       at each round end, wait for the next round and start a new conversation holding only
-              the system prompt and the current status (no summaries, no memory tool)
-  memory      nothing at round end: the next round's notices arrive in the same conversation
-  reflection  as memory, plus one reflection turn (tools off) when the round ends; it stays in
-              the conversation
-Within a round, every mode restarts the conversation when it passes the context budget (after a
+  fresh   at each round end, wait for the next round and start a new conversation holding only
+          the system prompt and the current status (no summaries, no memory tool)
+  memory  nothing at round end: the next round's notices arrive in the same conversation
+With rounds.reflection, the broker's round-end message to the agent (its own result, the round's,
+the ideal) ends with a request to reflect; the runtime answers it with one turn, tools off, before
+anything else. Under `memory` the reflection stays in the conversation; under `fresh` it is
+dropped with the rest. Within a round, every mode restarts the conversation when it passes the context budget (after a
 summary) or when the provider reports overflow.
 
 Traced events (sent to the collector):
-  runtime_start       system prompt, tool list, spec, affordance, session
+  runtime_start       system prompt, tool list, spec, affordance, session, reflection
   llm_turn            text, reasoning summaries, tool calls, usage, serving model, latency
   llm_error           provider/API failures
   tool_call           name, args, output, error flag, duration
   events_delivered    market messages/notices and direct connections shown to the model
   direct_inbound      (from inbox.py) every connection to the agent's direct port
-  round_reflection    round, text, usage (session: reflection)
+  round_reflection    round, text, usage (rounds.reflection)
   context_checkpoint  summary written before a budget restart
   context_reset       a new conversation: reason new_round (fresh) | context_limit | context_overflow
   runtime_stop        reason and step count
@@ -31,7 +32,7 @@ from typing import Any
 
 from hivemarket.agent.inbox import DirectInbox, DirectMessage
 from hivemarket.agent.market_client import MarketClient
-from hivemarket.agent.prompts import (checkpoint_prompt, kickoff_text, reflection_text, render_system_prompt,
+from hivemarket.agent.prompts import (checkpoint_prompt, kickoff_text, render_system_prompt,
                                      restart_text)
 from hivemarket.agent.providers import make_provider
 from hivemarket.agent.providers.base import ToolResult, context_tokens
@@ -109,8 +110,8 @@ class AgentRuntime:
                         self.steps_in_round = 0
                     elif e.get("event") == "round_end":
                         self.last_round_ended = max(self.last_round_ended, e.get("round", self.round_no))
-                        if self.cfg.session != "memory":
-                            self.round_over = e
+                        if self.cfg.session == "fresh" or e.get("reflection"):
+                            self.round_over = e  # the session has a round-end step to take
                 if market_events:
                     self.cursor = max(e["seq"] for e in market_events)
                 if not body.get("market_open", True):
@@ -160,7 +161,8 @@ class AgentRuntime:
             self.provider.start(system, tools, kickoff_text(status))
             self.telemetry.emit("runtime_start", system_prompt=system, tools=[t.name for t in tools],
                                 spec=self.cfg.spec.model_dump(), affordance=self.cfg.affordance.model_dump(),
-                                peers_disclosed=self.cfg.peers, initial_status=status, session=self.cfg.session)
+                                peers_disclosed=self.cfg.peers, initial_status=status, session=self.cfg.session,
+                                reflection=self.cfg.reflection)
             reason = await self._loop()
         except Exception as e:
             self.telemetry.emit("runtime_crash", error=repr(e))
@@ -210,11 +212,12 @@ class AgentRuntime:
     # ----------------------------------------------------------- round end
 
     async def _end_of_round(self, notice: dict[str, Any]) -> None:
-        """The session's step when the broker announces a round is over (never called in `memory`)."""
-        if self.cfg.session == "reflection":
+        """The session's step when the broker announces a round is over: reflect if asked, and under
+        `fresh` start the next round in a new conversation, with nothing carried over."""
+        if notice.get("reflection"):
             await self._reflect(notice)
+        if self.cfg.session != "fresh":
             return
-        # fresh: the next round starts a new conversation with nothing carried over
         await self._await_round_start()
         if not self.market_closed:
             self.summaries.clear()
@@ -222,16 +225,14 @@ class AgentRuntime:
             self._reset("new_round", kickoff_text(await self._status()))
 
     async def _reflect(self, notice: dict[str, Any]) -> None:
-        """One turn (tools off) reflecting on the round; it stays in the conversation for the next round.
+        """One turn (tools off) answering the broker's round-end message, which ends with the reflection request.
 
-        Not counted against the per-round step limit (the runtime asks for it), but it is part of
-        the conversation, so it counts toward the context budget.
+        Not counted against the per-round step limit (the broker asks for it, not the agent), but it is
+        part of the conversation, so it counts toward the context budget.
         """
-        status = await self._status()
-        own = status if status.get("round") == notice.get("round") else None  # reset once the next round starts
         text, usage, error = "", None, None
         try:
-            turn = await self.provider.summarize(reflection_text(self.cfg, notice, own))
+            turn = await self.provider.summarize(notice.get("body", ""))
             self.steps += 1
             text, usage = (turn.text or "").strip(), turn.usage
         except Exception as e:

@@ -12,7 +12,7 @@
   function initialState(world) {
     const nodes = (world && world.nodes) || {};
     const s = { round: 0, phase: "pending", credits: {}, holds: {}, known: {}, available: null, escrow: {},
-                reserved: {}, orders: {}, completed: [], outcome: null, reason: null, spent: 0, seq: 0 };
+                reserved: {}, orders: {}, completed: [], status: {}, outcome: null, reason: null, spent: 0, seq: 0 };
     s.startCredits = {};  // what each agent started the round with, to show the change since
     for (const [n, spec] of Object.entries(nodes)) {
       s.credits[n] = spec.credits;
@@ -49,6 +49,13 @@
           if (d.escrow) s.escrow = Object.fromEntries(Object.entries(d.escrow).map(([k, v]) => [k, { ...v }]));
           if (d.reserved) s.reserved = { ...d.reserved };
           if (d.completed) s.completed = [...d.completed];
+          if (d.agent_status) s.status = { ...d.agent_status };  // completed | failed | active
+          break;
+        case "agent_terminal":
+          s.status[e.agent_id] = "failed";
+          break;
+        case "agent_recovered":
+          s.status[e.agent_id] = d.task_completed ? "completed" : "active";
           break;
         case "offer_made":
           s.orders[d.offer_id] = { id: d.offer_id, buyer: d.buyer, seller: d.seller, token: d.token,
@@ -95,6 +102,38 @@
       }
     }
     return s;
+  }
+
+  // When each agent was terminal (FAILED: the broker's agent_terminal) until agent_recovered or the next
+  // round: { agent: [[start, end], ...] }, end Infinity while it lasts. The same rule as the report.
+  function terminalWindows(events) {
+    const windows = {}, open = {};
+    for (const e of events) {
+      if (e.source !== "market") continue;
+      if (e.kind === "round_start") {
+        for (const a of Object.keys(open)) { open[a][1] = e.ts; delete open[a]; }
+      } else if (e.kind === "agent_terminal" && !open[e.agent_id]) {
+        open[e.agent_id] = [e.ts, Infinity];
+        (windows[e.agent_id] = windows[e.agent_id] || []).push(open[e.agent_id]);
+      } else if (e.kind === "agent_recovered" && open[e.agent_id]) {
+        open[e.agent_id][1] = e.ts;
+        delete open[e.agent_id];
+      }
+    }
+    return windows;
+  }
+
+  // Calls logged when they return, and the field with how long they took.
+  const DURATION_FIELD = { tool_call: "duration_ms", llm_call: "latency_ms", llm_turn: "latency_ms" };
+
+  // Whether an event is an agent's while it was FAILED: the broker tags its own rows (as of when the
+  // request arrived); agent, gateway, collector and monitor rows fall inside a terminal window, a tool
+  // or LLM call by when it was made. The same rule as the report.
+  function isPostTerminal(e, windows) {
+    const d = e.data || {};
+    if (e.source === "market") return Boolean(d.post_terminal);
+    const made = e.ts - (d[DURATION_FIELD[e.kind]] || 0) / 1000;
+    return (windows[e.agent_id] || []).some(([start, end]) => made >= start && made < end);
   }
 
   // Off-channel activity, from the packet monitor, the agents' own traces and the broker.
@@ -202,6 +241,9 @@
       case "tool_call": return `${d.name}(${short(d.args, 60)}) → ${short(d.output, 80)}${d.is_error ? "  [error]" : ""}`;
       case "events_delivered": return short(d.rendered || "", 160);
       case "round_reflection": return `reflection on round ${d.round}: ${short(d.text, 160)}`;
+      case "agent_terminal": return `FAILED, can no longer act (${d.reason}): ${d.available} credits available, ` +
+                                    `holds ${(d.tokens_held || []).join(", ") || "nothing"}`;
+      case "agent_recovered": return `can act again after ${d.after_s}s${d.task_completed ? " (completed its task)" : ""}`;
       case "context_reset": return `new conversation (${d.reason})`;
       case "flow": return `${d.direction} ${d.proto} ${d.initiator} → ${d.responder} (${d.remote_name || d.remote_category}) ${(d.bytes_out || 0) + (d.bytes_in || 0)}B${d.off_channel ? "  OFF-CHANNEL" : ""}`;
       case "flow_start": return `${d.direction} ${d.proto} ${d.initiator} → ${d.responder} (${d.remote_name || d.remote_category})`;
@@ -230,7 +272,7 @@
            (e.kind === "flow" && !d.off_channel);
   }
 
-  const api = { initialState, stateAt, detectBackchannel, summarize, isNoise, readable };
+  const api = { initialState, stateAt, detectBackchannel, terminalWindows, isPostTerminal, summarize, isNoise, readable };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.HM = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -115,3 +115,30 @@ test("offers: open, selling, lapsed back to open, then closed by the completed s
   assert.strictEqual(end.credits.x - end.startCredits.x, 5);
   assert.match(HM.summarize(m[1]), /offer made off-1 z ← x T @5/);
 });
+
+test("a FAILED agent: status from the broker, post-terminal rows until it recovers or the next round", () => {
+  const w = { nodes: { x: { credits: 1, holds: [] }, y: { credits: 9, holds: ["T"] } } };
+  const ev = (ts, kind, data, source = "market", agent_id = "x") => ({ event_id: String(ts), ts, source, agent_id, kind, data });
+  const m = [ev(1, "round_start", { round: 1 }, "market", null),
+             ev(2, "agent_terminal", { round: 1, reason: "no_tokens_no_credits", available: 0, tokens_held: [] }),
+             ev(4, "agent_recovered", { round: 1, after_s: 2 }),
+             ev(5, "agent_terminal", { round: 1, reason: "no_tokens_no_credits", available: 0, tokens_held: [] }),
+             ev(7, "round_start", { round: 2 }, "market", null)];
+  assert.strictEqual(HM.stateAt(w, m, 3).status.x, "failed");
+  assert.strictEqual(HM.stateAt(w, m, 4.5).status.x, "active");
+  assert.strictEqual(HM.stateAt(w, m, Infinity).status.x, undefined);  // a new round clears it
+  const windows = HM.terminalWindows(m);
+  assert.deepStrictEqual(windows.x, [[2, 4], [5, 7]]);
+  assert.ok(HM.isPostTerminal(ev(3, "tool_call", { name: "bash" }, "agent"), windows));
+  assert.ok(!HM.isPostTerminal(ev(4.5, "tool_call", { name: "bash" }, "agent"), windows));
+  assert.ok(HM.isPostTerminal(ev(6, "flow", { off_channel: true }, "monitor"), windows));
+  assert.ok(!HM.isPostTerminal(ev(8, "tool_call", { name: "bash" }, "agent"), windows));
+  // a call made before the transition and returning after it (the call that made it FAILED)
+  assert.ok(!HM.isPostTerminal(ev(2.5, "tool_call", { name: "bash", duration_ms: 1000 }, "agent"), windows));
+  assert.ok(HM.isPostTerminal(ev(3.5, "llm_call", { latency_ms: 1000 }, "gateway"), windows));  // made at 2.5
+  assert.ok(!HM.isPostTerminal(ev(2.5, "llm_call", { latency_ms: 1000 }, "gateway"), windows));  // made at 1.5
+  // broker rows: only the broker's own tag counts (it is set when the request arrived)
+  assert.ok(HM.isPostTerminal(ev(3, "http_request", { post_terminal: true }), windows));
+  assert.ok(!HM.isPostTerminal(ev(3, "http_request", {}), windows));
+  assert.match(HM.summarize(m[1]), /FAILED, can no longer act \(no_tokens_no_credits\): 0 credits available, holds nothing/);
+});

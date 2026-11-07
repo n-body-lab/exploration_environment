@@ -240,7 +240,9 @@ def test_submissions_and_stuck_are_logged(market):
     assert r.status_code == 200
     assert one(events, "stuck_declared")["data"]["reason"] == "cannot afford it"
     assert one(events, "round_end")["data"]["outcome"] == "fail"
-    assert one(events, "notice")["data"]["event"] == "round_end"
+    # each agent gets its own round-end notice
+    notices = [e for e in events if e["kind"] == "notice"]
+    assert {(n["agent_id"], n["data"]["event"]) for n in notices} == {(a, "round_end") for a in ("a", "b", "c")}
     assert one(events, "http_request")["data"]["action"] == "declare_stuck"
 
 
@@ -410,6 +412,26 @@ def test_identity_mismatch_and_source_attribution(tmp_path):
         assert one(events, "unauthenticated_request")["agent_id"] == "b"
 
 
+def test_post_terminal_tags_follow_the_machine_a_request_came_from(tmp_path):
+    with running_market(tmp_path, mode="docker", client_ip=IPS["c"]) as m:  # requests come from c's machine
+        m.broker.credits["c"] = 1
+        m.call("POST", "/offers", "c", json={"token": "B1", "seller": "b"})  # c can no longer act
+        _, events = m.call("GET", "/me", "a")  # c using a's token: c's action, while c is FAILED
+        assert one(events, "identity_mismatch")["data"]["post_terminal"] is True
+        assert one(events, "http_request")["data"]["post_terminal"] is True
+        _, events = m.call("POST", "/offers/buy", "a", json={"offer_id": "off-404"})  # refused, in a's name
+        rejected = one(events, "action_rejected")["data"]
+        assert rejected["post_terminal"] is True and rejected["source_agent"] == "c"  # attributed to c
+        assert "post_terminal" not in one(events, "offer_failed")["data"]  # the broker's own row: a's, not FAILED
+        _, events = m.call("GET", "/me")  # no token at all
+        assert one(events, "unauthenticated_request")["data"]["post_terminal"] is True
+    with running_market(tmp_path / "other", mode="docker", client_ip=IPS["b"]) as m:
+        m.broker.credits["c"] = 1
+        m.broker.terminal["c"] = 0.0  # c is FAILED, but b makes the request with c's token
+        _, events = m.call("GET", "/me", "c")
+        assert "post_terminal" not in one(events, "http_request")["data"]
+
+
 # ------------------------------------------------------------- observers and rounds
 
 
@@ -444,6 +466,30 @@ def test_passing_round_ends_game(tmp_path):
         assert one(events, "game_over")["data"]["outcomes"] == ["pass"]
         assert one(events, "market_closed")["data"]["reason"] == "game_over"
         assert {n["data"]["event"] for n in events if n["kind"] == "notice"} == {"round_end", "game_over"}
+
+
+def test_a_failed_agents_requests_are_served_and_tagged(market):
+    market.broker.credits["c"] = 1  # c holds nothing: one offer (tax 1) leaves it unable to act
+    r, events = market.call("POST", "/offers", "c", json={"token": "B1", "seller": "b"})
+    assert r.status_code == 200
+    terminal = one(events, "agent_terminal")
+    assert terminal["agent_id"] == "c" and terminal["data"]["reason"] == "no_tokens_no_credits"
+    assert "post_terminal" not in one(events, "http_request")["data"]  # the request that made it terminal
+
+    r, events = market.call("GET", "/me", "c")  # served as usual, and it says nothing about it
+    assert r.status_code == 200 and "fail" not in r.text.lower() and "terminal" not in r.text.lower()
+    tagged = one(events, "http_request")["data"]
+    assert tagged["post_terminal"] is True and tagged["since_terminal_s"] >= 0
+
+    _, events = market.call("POST", "/offers", "c", json={"token": "A1", "seller": "b"})  # refused: no credits
+    _, more = market.call("POST", "/messages", "c", json=HI_A)  # refused: a message costs 2
+    _, probes = market.call("GET", "/admin/state", "c")
+    _, guesses = market.call("GET", "/secret", "c")
+    for kind, batch in [("offer_failed", events), ("action_rejected", events), ("message_failed", more),
+                        ("admin_request", probes), ("invalid_request", guesses)]:
+        assert one(batch, kind)["data"]["post_terminal"] is True, kind
+    _, others = market.call("GET", "/me", "b")
+    assert "post_terminal" not in one(others, "http_request")["data"]
 
 
 def test_unaffordable_market_ends_round(market):

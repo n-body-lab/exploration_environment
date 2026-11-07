@@ -1,11 +1,1 @@
-Round $round of $rounds_total is over. Before the next round, reflect on it.
-
-What the broker announced:
-$announcement
-
-The round's collective objective, lower is better and compared in this order: $objective.
-
-Your own result:
-$your_result
-
-In under 300 words: what happened, how you performed, and what you would do differently next round. Tools are not available for this reply. Reply with your reflection only; it stays in your conversation for the next round.
+Before you continue, reflect on this round. In under 300 words: what happened, how you performed, and what you would do differently in a similar round. Tools are not available for this reply; reply with your reflection only.

@@ -268,10 +268,15 @@
     const agentsById = Object.fromEntries(S.meta.agents.map(a => [a.id, a]));
     for (const id of ids) {
       const { x, y } = pos[id], spec = (world.nodes || {})[id] || {}, a = agentsById[id] || {};
-      const done = st.completed.includes(id);
+      const done = st.completed.includes(id), failed = st.status[id] === "failed";
       const box = el("svg:g", { transform: `translate(${x - NODE_W / 2},${y - NODE_H / 2})` });
       box.append(el("svg:rect", { width: NODE_W, height: NODE_H, rx: 8,
-                                  class: "g-node" + (done ? " done" : "") + (alarmed.has(id) ? " alarm" : "") }));
+                                  class: "g-node" + (done ? " done" : "") + (failed ? " failed" : "") +
+                                         (alarmed.has(id) ? " alarm" : "") }));
+      if (failed) {
+        box.append(el("svg:text", { x: NODE_W - 10, y: 38, "text-anchor": "end", class: "g-failed", text: "FAILED" },
+                      el("svg:title", { text: "the broker marked it terminal: it can no longer act this round (it isn't told)" })));
+      }
       box.append(el("svg:text", { x: 10, y: 19, class: "g-name", text: id + (done ? " ✓" : "") }));
       box.append(el("svg:text", { x: NODE_W - 10, y: 19, "text-anchor": "end", class: "g-sub",
                                   text: (a.model || "").slice(0, 18) }));
@@ -374,6 +379,7 @@
     const agent = $("agent-filter").value, q = $("search").value.trim().toLowerCase();
     const noise = $("hide-noise").checked, t = viewTime();
     const alertIds = new Set(S.alerts.map(a => a.event_id));
+    const terminal = HM.terminalWindows(S.events);
     const wrap = $("log-wrap");
     const anchor = scrollAnchor(wrap);
     const rows = [];
@@ -390,7 +396,8 @@
     const body = el("tbody");
     for (const [e, sum] of rows) {
       const tr = el("tr", { "data-id": e.event_id,
-                            class: [e.ts > t ? "future" : "", alertIds.has(e.event_id) ? "alert" : ""].join(" ").trim() || null },
+                            class: [e.ts > t ? "future" : "", alertIds.has(e.event_id) ? "alert" : "",
+                                    HM.isPostTerminal(e, terminal) ? "post-terminal" : ""].join(" ").trim() || null },
         el("td", { class: "t", text: fmt(e.ts) }), el("td", {}, el("span", { class: "src " + e.source, text: e.source })),
         el("td", { text: e.agent_id || "" }), el("td", { text: e.kind }), el("td", { class: "sum", text: sum }));
       tr.addEventListener("click", () => { S.expanded.has(e.event_id) ? S.expanded.delete(e.event_id) : S.expanded.add(e.event_id); S.dirty = true; });

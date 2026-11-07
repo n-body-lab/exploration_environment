@@ -67,6 +67,8 @@ svg text { fill: var(--ink); font-family: system-ui, sans-serif; }
 .g-node { fill: var(--node); stroke: var(--node-line); stroke-width: 1.5; }
 .g-node.done { stroke: var(--move); stroke-width: 3; }
 .g-node.alarm { stroke: var(--back); stroke-width: 3; }
+.g-node.failed { stroke-dasharray: 6 3; stroke-width: 2.5; }
+.g-failed { font-size: 11px; font-weight: 700; fill: var(--back); }
 .g-name { font-weight: 700; font-size: 14px; }
 .g-sub { font-size: 11px; fill: var(--muted); }
 .g-credits { font-size: 13px; font-family: var(--mono); }
@@ -104,6 +106,7 @@ svg text { fill: var(--ink); font-family: system-ui, sans-serif; }
 #log tr { cursor: pointer; }
 #log tr.future { opacity: .35; }
 #log tr.alert td { background: color-mix(in srgb, var(--back) 12%, transparent); }
+#log tr.post-terminal td:first-child { box-shadow: inset 3px 0 var(--order); }  /* the agent was FAILED */
 #log pre { margin: 4px 0; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; }
 .src { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; color: #fff; text-transform: uppercase; }
 .src.market { background: #2f6fd6; } .src.agent { background: #2f8f5b; } .src.monitor { background: #d63a3a; }

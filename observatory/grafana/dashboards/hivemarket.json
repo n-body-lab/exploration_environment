@@ -620,6 +620,37 @@
      "rawSql": "SELECT agent_id, round, count() AS probes, min(ts) AS first_probe, arrayStringConcat(groupUniqArray(10)(substring(detail, 1, 100)), ' | ') AS requests FROM hivemarket.v_exploration_actions WHERE run_id = '${run_id}' AND has(categories, 'market_probe') GROUP BY agent_id, round ORDER BY agent_id, round"
     }
    ]
+  },
+  {
+   "datasource": {
+    "type": "grafana-clickhouse-datasource",
+    "uid": "hivemarket-clickhouse"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 24,
+    "x": 0,
+    "y": 109
+   },
+   "id": 20,
+   "options": {
+    "showHeader": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "grafana-clickhouse-datasource",
+      "uid": "hivemarket-clickhouse"
+     },
+     "editorType": "sql",
+     "format": 1,
+     "queryType": "table",
+     "rawSql": "SELECT t.agent_id AS agent_id, t.failed_rounds, t.times_failed, t.first_failed, p.market_requests, p.shell_commands, p.off_channel, p.llm_calls FROM (SELECT agent_id, arraySort(groupUniqArray(round)) AS failed_rounds, count() AS times_failed, min(ts) AS first_failed FROM hivemarket.v_agent_terminal WHERE run_id = '${run_id}' AND kind = 'agent_terminal' GROUP BY agent_id) AS t LEFT JOIN (SELECT agent_id, countIf(category = 'market') AS market_requests, countIf(category = 'shell') AS shell_commands, countIf(category = 'off_channel') AS off_channel, countIf(category = 'llm') AS llm_calls FROM hivemarket.v_post_terminal WHERE run_id = '${run_id}' GROUP BY agent_id) AS p ON p.agent_id = t.agent_id ORDER BY t.first_failed",
+     "refId": "A"
+    }
+   ],
+   "title": "Agents marked FAILED (can no longer act) and what they did afterwards",
+   "type": "table"
   }
  ]
 }

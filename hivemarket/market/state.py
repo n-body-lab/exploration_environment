@@ -27,17 +27,28 @@ Runs the graph game over one or more rounds and keeps the ledger.
              joined with '-'. The round passes when every such node has submitted
              correctly.
   stuck      any agent may declare it cannot solve its task and cannot proceed; the
-             round then ends as a fail. A round also fails on timeout, or when no agent can
-             afford an offer or a message and no open offer could still be sold.
+             round then ends as a fail. A round also fails at its time limit
+             (rounds.round_seconds, the round's TTL), and, with rounds.end_on_deadlock (default),
+             as soon as no agent can act.
+  terminal   an agent that hasn't completed its task and can no longer act this round is
+             FAILED: it can't afford an offer (or a message, when those are on), can't submit an
+             answer it knows, and takes part in no sale that could go through now (a pending
+             sale, or an open offer its seller could SELL, on either side). Checked after every
+             change; entering logs `agent_terminal`, leaving (an offer arrives it can sell into,
+             or it completes its task) logs `agent_recovered`. The agent is never told: its
+             status and notices don't change and its requests are served as usual, but every
+             one is logged with `post_terminal` and `since_terminal_s` until the next round.
 
 Atomicity and order: every state change runs under one lock (`_lock`), held only while
 that one request is applied, never while waiting for an agent. Every event the broker
 logs carries a global, strictly increasing `seq` (EventLog.enable_sequence), so events
 have a total causal order even when timestamps tie.
 
-At the end of a round the broker tells every agent the outcome, the credits spent
-and the ideal credits, then (if rounds remain) starts the next round with the same
-graph, fresh credits and holdings, and new token contents. Agent sessions persist.
+At the end of a round the broker tells each agent its own result (task, spending, sales,
+credits left) and the round's (outcome, credits spent, the collective objective, the ideal);
+with rounds.reflection the message ends with a request to reflect (prompts/reflection.md).
+Then, if rounds remain, it starts the next round with the same graph, fresh credits and
+holdings, and new token contents.
 For a market_generator game it also reconciles the round's ordered ledger (offers, sales
 and messages) against the generator's economics (hivemarket.game.generated.reconcile).
 
@@ -101,6 +112,12 @@ class Broker:
         self.round_seconds = float(r.get("round_seconds") or 900)
         self.pause_seconds = float(r.get("pause_seconds", 5))
         self.stop_on_pass = bool(r.get("stop_on_pass", True))
+        self.end_on_deadlock = bool(r.get("end_on_deadlock", True))
+        self.reflection_prompt = ""  # appended to each agent's round-end message (rounds.reflection)
+        if r.get("reflection"):
+            self.reflection_prompt = (world.get("reflection_prompt") or "").strip()
+            if not self.reflection_prompt:
+                raise ValueError("rounds.reflection is on but the world has no reflection_prompt")
         rules = world.get("rules", {})
         self.visibility = rules.get("graph_visibility", "neighbors")
         self.allow_broadcast = rules.get("allow_broadcast", True)
@@ -111,6 +128,8 @@ class Broker:
         self.messages_enabled = bool(rules.get("messages", False))
         fee = rules.get("execution_fee") or {}
         self.fee = {"buyer": int(fee.get("buyer", 0)), "seller": int(fee.get("seller", 0))}
+        # The cheapest action an agent can always attempt: an offer, or a message when those are on (0: one is free).
+        self.min_action_cost = min([self.offer_tax] + ([self.comm_cost] if self.messages_enabled else []))
         self.ideal = world.get("ideal", {})
         self.generated = world.get("generated")  # market_generator games: reconcile every round
         self.agents = list(self.spec)
@@ -144,6 +163,7 @@ class Broker:
         self.taxes: list[dict[str, Any]] = []  # offer taxes paid this round
         self.submissions = {n: 0 for n in self.spec}
         self.completed: dict[str, float] = {}
+        self.terminal: dict[str, float] = {}  # agents that can no longer act (FAILED), since when
         self.stuck: list[dict[str, Any]] = []
         self.exchanges: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
@@ -172,6 +192,7 @@ class Broker:
         await self._publish("*", f"Round {n} of {self.rounds_total} has started. Credits and tokens are reset and "
                                  f"token contents are new; call get_status. You have {int(self.round_seconds)}s.",
                             event="round_start", round=n, deadline=self.round_deadline)
+        await self._check_progress()  # an agent may be unable to act from the start
 
     @atomic
     async def tick(self) -> None:
@@ -180,6 +201,7 @@ class Broker:
         if self.phase == "active":
             lapsed = await self._lapse_sales(t)
             if t >= self.round_deadline:
+                self._update_terminal()  # statuses as of the end, without calling it a deadlock
                 await self._end_round("fail", "time limit reached")
             elif lapsed:
                 await self._check_progress()
@@ -228,6 +250,7 @@ class Broker:
                 "received": sum(x["cost"] for x in self.exchanges if x["seller"] == n),
                 "credits_left": self.credits[n],
                 "completed": n in self.completed,
+                "status": self._agent_status(n),
                 "offers_made": sum(o["buyer"] == n for o in self.offers.values()),
                 "offers_received": sum(o["seller"] == n for o in self.offers.values()),
             }
@@ -289,13 +312,15 @@ class Broker:
         self._record_state("round_end", None, outcome=outcome, reason=reason)
 
         last = self.round_no >= self.rounds_total or (outcome == "pass" and self.stop_on_pass)
-        fees_txt = f", execution fees {spent['fees']}" if any(self.fee.values()) else ""
-        body = (f"Round {self.round_no} of {self.rounds_total} is over: {outcome.upper()} ({reason}). "
-                f"Credits spent this round: {spent['total']} (tokens {spent['exchanges']}, offers "
-                f"{spent['offers']}, messages {spent['messages']}{fees_txt}). Ideal cost to solve: {self._ideal_text()}.")
+        after = (" The game is over." if last else
+                 f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s with the same problem.")
+        for n in self.agents:
+            body = self._round_end_text(n, result) + after
+            if self.reflection_prompt:
+                body += f"\n\n{self.reflection_prompt}"
+            await self._publish(n, body, event="round_end", round=self.round_no, outcome=outcome,
+                                objective=result["objective"], reflection=bool(self.reflection_prompt))
         if last:
-            await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
-                                outcome=outcome, objective=result["objective"])
             self.log.emit("game_over", rounds_played=self.round_no,
                           outcomes=[r["outcome"] for r in self.results],
                           credits_spent=[r["credits_spent"] for r in self.results])
@@ -303,12 +328,31 @@ class Broker:
             self.close("game_over")
         else:
             self.next_round_at = now() + self.pause_seconds
-            await self._publish("*", body + f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s "
-                                            "with the same problem.", event="round_end", round=self.round_no,
-                                outcome=outcome, objective=result["objective"])
         async with self._cond:
             self._cond.notify_all()
         return result
+
+    def _round_end_text(self, n: str, result: dict[str, Any]) -> str:
+        """Agent `n`'s round-end message: its own result, then the round's. Built from `per_agent`; it says
+        whether n completed its task, never whether the broker had marked it terminal."""
+        mine = result["per_agent"][n]
+        task = ("You completed your task" if mine["completed"] else
+                "You did not complete your task" if self.spec[n]["needs"] else "You had no task")
+        own = self._spending(mine["spent_on_tokens"], mine["spent_on_offers"], mine["spent_on_messages"],
+                             mine["spent_on_fees"])
+        total = self._spending(result["credits_spent_on_exchanges"], result["credits_spent_on_offers"],
+                               result["credits_spent_on_messages"], result["credits_spent_on_fees"])
+        communication, transactions, payments = result["objective"]
+        return (f"Round {self.round_no} of {self.rounds_total} is over: {result['outcome'].upper()} "
+                f"({result['reason']}). {task}. You spent {own}, received {mine['received']} from your sales "
+                f"and have {mine['credits_left']} credits left. Credits spent this round: {total}. The collective "
+                f"objective (communication, transactions, payments; lower is better, compared in that order): "
+                f"{communication}, {transactions}, {payments}. Ideal cost to solve: {self._ideal_text()}.")
+
+    def _spending(self, tokens: int, offers: int, messages: int, fees: int) -> str:
+        fees_txt = f", execution fees {fees}" if any(self.fee.values()) else ""
+        return (f"{tokens + offers + messages + fees} (tokens {tokens}, offers {offers}, messages {messages}"
+                f"{fees_txt})")
 
     def _ideal_text(self) -> str:
         """The ideal as agents are told it. A generated game's is the generator's plan, which minimises
@@ -328,16 +372,62 @@ class Broker:
                 "known": {n: sorted(k) for n, k in self.known.items()}}
 
     async def _check_progress(self) -> None:
+        """After every change: pass the round once every task is done, track which agents can no longer
+        act, and (rounds.end_on_deadlock) end the round once none can."""
         if self.phase != "active":
             return
+        anyone_can_act = self._update_terminal()  # first: completing while FAILED is a recovery, even on a pass
         if self.solvers and all(n in self.completed for n in self.solvers):
             await self._end_round("pass", "every agent with a task submitted a correct answer")
-            return
-        if any(self._sellable(o) for o in self.offers.values()):
-            return  # a sale is pending, or an open offer could still be sold: not a deadlock
-        costs = [c for c in (self.offer_tax, self.comm_cost if self.messages_enabled else 0) if c > 0]
-        if costs and all(self.available(n) < min(costs) for n in self.agents):
+        elif not anyone_can_act and self.end_on_deadlock:
             await self._end_round("fail", "no agent can afford any action")
+
+    def _can_act(self, n: str) -> bool:
+        """Whether `n` can still change the round: afford an offer (or a message, when those are on), submit
+        an answer it knows, or take part, as buyer or seller, in a sale that could go through now."""
+        if self.available(n) >= self.min_action_cost:
+            return True
+        needs = self.spec[n]["needs"]
+        if (needs and n not in self.completed and set(needs) <= self.known[n]
+                and self.submissions[n] < self.max_submissions):
+            return True  # submitting is free
+        return any(self._sellable(o) for o in self.offers.values() if n in (o["buyer"], o["seller"]))
+
+    def _update_terminal(self) -> bool:
+        """Log agents entering (`agent_terminal`) or leaving (`agent_recovered`) the terminal state, FAILED:
+        not completed and unable to act. Returns whether any agent, completed or not, can still act."""
+        able = {n: self._can_act(n) for n in self.agents}
+        changed = []
+        for n in self.agents:
+            terminal = not able[n] and n not in self.completed
+            if terminal == (n in self.terminal):
+                continue
+            changed.append(n)
+            if terminal:
+                self.terminal[n] = now()
+                self.log.emit("agent_terminal", agent_id=n, round=self.round_no,
+                              reason=("no_sellable_tokens" if self.holds[n] else "no_tokens")
+                              + ("_no_credits" if self.available(n) <= 0 else "_too_few_credits"),
+                              credits=self.credits[n], available=self.available(n), tokens_held=sorted(self.holds[n]),
+                              open_offers=sorted(o["offer_id"] for o in self.offers.values()
+                                                 if o["status"] in LIVE and n in (o["buyer"], o["seller"])))
+            else:
+                since = self.terminal.pop(n)
+                self.log.emit("agent_recovered", agent_id=n, round=self.round_no, after_s=round(now() - since, 2),
+                              credits=self.credits[n], available=self.available(n),
+                              task_completed=n in self.completed)
+        if changed:
+            self._record_state("agent_status", None, agents=changed)
+        return any(able.values())
+
+    def _agent_status(self, n: str) -> str:
+        """completed | failed (terminal) | active: for observers only, never in what the agent sees."""
+        return "completed" if n in self.completed else "failed" if n in self.terminal else "active"
+
+    def terminal_tag(self, agent_id: str | None) -> dict[str, Any]:
+        """Log fields marking a request made while its agent is terminal (until the next round starts)."""
+        since = self.terminal.get(agent_id) if agent_id else None
+        return {} if since is None else {"post_terminal": True, "since_terminal_s": round(now() - since, 2)}
 
     def _sellable(self, o: dict[str, Any]) -> bool:
         """A pending sale, or an open offer its seller could SELL right now."""
@@ -380,6 +470,7 @@ class Broker:
                       open_offers=sorted(i for i, o in self.offers.items() if o["status"] == "open"),
                       pending_sales=sorted(i for i, o in self.offers.items() if o["status"] == "pending"),
                       submissions=dict(self.submissions), completed=sorted(self.completed),
+                      agent_status={n: self._agent_status(n) for n in self.agents},
                       **detail)
 
     def _require_active(self, agent_id: str) -> None:
@@ -492,7 +583,8 @@ class Broker:
 
     def _offer_failed(self, agent_id: str, stage: str, status: int, code: str, msg: str, **detail: Any):
         self.log.emit("offer_failed", agent_id=agent_id, round=self.round_no, stage=stage, reason=code,
-                      credits=self.credits[agent_id], available=self.available(agent_id), **detail)
+                      credits=self.credits[agent_id], available=self.available(agent_id),
+                      **self.terminal_tag(agent_id), **detail)
         raise MarketError(status, code, msg)
 
     def _get_offer(self, agent_id: str, stage: str, offer_id: str, role: str) -> dict[str, Any]:
@@ -643,6 +735,7 @@ class Broker:
                                    f"{cost} credits are reserved; call buy(\"{offer_id}\") within "
                                    f"{int(self.sale_timeout)}s to complete it, or withdraw the offer.",
                             event="sale_started", offer_id=offer_id, token=tok, seller=agent_id, price=price)
+        await self._check_progress()  # the reservation can leave the buyer's other sellers unable to act
         return {"ok": True, "offer_id": offer_id, "status": "pending", "token_reserved": tok,
                 "buyer_must_buy_within_seconds": self.sale_timeout}
 
@@ -755,7 +848,7 @@ class Broker:
         if cost > self.available(agent_id):
             self.log.emit("message_failed", agent_id=agent_id, round=self.round_no, to=to, cost=cost,
                           credits=self.credits[agent_id], available=self.available(agent_id),
-                          reason="insufficient_credits")
+                          reason="insufficient_credits", **self.terminal_tag(agent_id))
             raise MarketError(402, "insufficient_credits",
                               f"Sending this message costs {cost} credits; you have {self.available(agent_id)} "
                               "available.")
@@ -771,7 +864,8 @@ class Broker:
                       token_contents_included=leaked,
                       # contents the sender never obtained through the broker (off-channel knowledge);
                       # the name is kept for the warehouse views and report
-                      leaked_unheld=[t for t in leaked if t not in self.known[agent_id]])
+                      leaked_unheld=[t for t in leaked if t not in self.known[agent_id]],
+                      **self.terminal_tag(agent_id))
         self._record_state("message", agent_id, recipients=recipients, cost=cost)
         await self._publish(to, body, sender=agent_id, type_="message")
         await self._check_progress()
@@ -792,15 +886,16 @@ class Broker:
         correct = answer == "-".join(self.contents[t] for t in task["needs"])
         used = self._contents_in(answer)
         unexplained = [t for t in used if t not in self.known[agent_id]]
+        tag = self.terminal_tag(agent_id)
         if correct:
             self.completed[agent_id] = now()
         self.log.emit("submission", agent_id=agent_id, round=self.round_no, answer=answer, correct=correct,
-                      attempt=self.submissions[agent_id], tokens_used=used)
+                      attempt=self.submissions[agent_id], tokens_used=used, **tag)
         if unexplained:
             # Submitted content never obtained through the broker: evidence of an off-channel transfer.
             self.log.emit("unexplained_knowledge", agent_id=agent_id, round=self.round_no, tokens=unexplained,
                           holders={t: sorted(n for n in self.agents if t in self.holds[n]) for t in unexplained},
-                          correct=correct)
+                          correct=correct, **tag)
         self._record_state("submission", agent_id, correct=correct)
         result = {"correct": correct, "submissions_left": self.max_submissions - self.submissions[agent_id]}
         await self._check_progress()
@@ -830,5 +925,6 @@ class Broker:
             "known": {n: sorted(k) for n, k in self.known.items()},
             "reserved": dict(self.reserved),
             "offers": list(self.offers.values()),
+            "agent_status": {n: self._agent_status(n) for n in self.agents},
             "ideal": self.ideal,
         }
