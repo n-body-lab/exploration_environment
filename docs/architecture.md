@@ -121,7 +121,7 @@ Agents are told this happens. Every checkpoint and restart is traced (`context_c
 
 ### Using Qwen and other OpenAI-compatible models
 
-- Hosted Qwen works through the built-in `dashscope` route (Alibaba Cloud Model Studio, `DASHSCOPE_API_KEY`), `openrouter` or `huggingface`. Self-hosted servers (vLLM, SGLang, Ollama) are added as `gateway_routes`. See `experiments/qwen_graph_relay.yaml`.
+- Hosted Qwen works through the built-in `dashscope` route (Alibaba Cloud Model Studio, `DASHSCOPE_API_KEY`), `adaption` (Adaption Labs, `ADAPTION_API_KEY`; see `experiments/qwen_adaption.yaml`), `openrouter` or `huggingface`. Self-hosted servers (vLLM, SGLang, Ollama) are added as `gateway_routes`. See `experiments/qwen_graph_relay.yaml`.
 - `effort` is sent as `reasoning_effort` only when set. The token limit uses each route's field (`max_tokens`, or `max_completion_tokens` for OpenAI). `extra_body` passes provider-specific fields through, e.g. `{enable_thinking: false}` for Qwen3 hybrid models.
 - Reasoning text the server returns (`reasoning_content`) is kept in the trace but not sent back in the history.
 - Keep `max_tokens` well below the window (the config enforces less than a third).

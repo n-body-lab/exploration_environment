@@ -1,0 +1,27 @@
+# The graph_relay game with Qwen through Adaption Labs (built-in route "adaption").
+# Set ADAPTION_API_KEY in your environment (or a git-ignored .env); never commit the key.
+name: qwen-adaption
+seed: 1
+agents:
+  - provider: adaption
+    model: qwen3.5-397b         # check the model's context window and set context.window_tokens to match
+    max_tokens: 4096            # leave room for the conversation
+    effort: null                # not sent to OpenAI-compatible servers unless set
+    count: 3
+graph:
+  nodes:
+    agent-1: {credits: 100, holds: [A1, A2], needs: []}
+    agent-2: {credits: 100, holds: [B1],     needs: [A1]}
+    agent-3: {credits: 60,  holds: [],       needs: [A1, B1]}
+  edges:
+    - {from: agent-1, to: agent-2, cost: 10}
+    - {from: agent-2, to: agent-1, cost: 7}
+    - {from: agent-2, to: agent-3, cost: 4}
+    - {from: agent-3, to: agent-1, cost: 6}
+communication_cost: 2
+rounds: {count: 5, round_seconds: 600, max_steps_per_round: 60}
+context:
+  window_tokens: 100000         # the same budget applies to every agent in the experiment
+  reset_at_fraction: 0.75
+affordance:
+  level: shell

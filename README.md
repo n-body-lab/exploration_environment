@@ -17,7 +17,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket run experiments/docker_smoke.yaml    # Docker + observatory, ~1 min (first build longer)
 
 # Real experiment: needs Docker running and provider keys in the environment
-export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN as needed
+export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ADAPTION_API_KEY as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
 # Rebuild the report for an existing run / (re)ship it to the observatory
