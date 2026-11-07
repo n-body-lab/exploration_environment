@@ -1,0 +1,14 @@
+# Scripted agents, no LLM calls, local mode (~20s): a small market_generator market (3 agents, 4
+# tokens) with execution fees, the generator's ideal and per-round ledger reconciliation.
+# Needs the generator on the host: pip install -e ".[generator]" (Python >= 3.11).
+name: local-generated
+seed: 1
+agents:
+  - {provider: scripted, model: scripted, script: honest, count: 3}
+tasks:
+  generator: market_generator
+  market: {n_tokens: 4}
+rounds: {count: 2, round_seconds: 20, pause_seconds: 1}
+market: {order_timeout_seconds: 5}
+affordance:
+  level: none

@@ -32,6 +32,16 @@ TOKEN_TRANSFER_NOTE = {
 }
 
 
+def execution_fee_text(fee: dict[str, int] | None) -> str:
+    """Appended to the buying rule; empty when purchases carry no execution fee."""
+    buyer, seller = (fee or {}).get("buyer", 0), (fee or {}).get("seller", 0)
+    if not (buyer or seller):
+        return ""
+    return (f" Every completed purchase also burns an execution fee, paid to no one: {buyer} credit(s) from the buyer "
+            f"and {seller} from the seller. Each side must have its fee available before the trade: the buyer's is "
+            "set aside with the price, the seller's when it accepts.")
+
+
 def environment_text(cfg: AgentRuntimeConfig) -> str:
     level = cfg.affordance.level
     extra = transparency_text(cfg)
@@ -105,6 +115,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost", 0),
         "order_timeout": int(status.get("order_timeout_seconds", 90)),
+        "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
         "rules": rules_text(cfg),
         "context_note": context_text(cfg),

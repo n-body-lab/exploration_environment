@@ -16,6 +16,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket local experiments/local_smoke.yaml   # no Docker, ~20s
 .venv/bin/hivemarket run experiments/docker_smoke.yaml    # Docker + observatory, ~1 min (first build longer)
 
+# Markets from n-body-lab/market_generator (Python >= 3.11; installed from git at the pinned commit)
+.venv/bin/pip install -e ".[generator]"
+.venv/bin/hivemarket local experiments/local_generated.yaml   # scripted agents, no Docker, ~20s
+.venv/bin/hivemarket run experiments/generated_medium.yaml    # LLM agents; also generated_easy / _hard / _fragile
+
 # Real experiment: needs Docker running and provider keys in the environment
 export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ADAPTION_API_KEY as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
@@ -51,6 +56,7 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `artifacts/<agent>/` | every version of every file the agent wrote, final workspace tarball, files changed outside it |
 | `logs/orchestrator.jsonl`, `logs/docker_compose.log` | run lifecycle, container diffs, all container stdout |
 | `manifest.json`, `world.json`, `experiment.yaml` | identities, ground truth, exact config |
+| `generator.json` | market_generator games: the generator's full export (solutions, proof, difficulty); replayable with `tasks.file` |
 
 ## Experiments
 
@@ -65,3 +71,6 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `experiments/local_smoke.yaml` | scripted agents, local mode: relay game that passes in round 1 |
 | `experiments/local_fail.yaml` | scripted agents, local mode: unaffordable need, rogue contact, 2 failing rounds |
 | `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |
+| `experiments/generated_easy.yaml`, `generated_medium.yaml`, `generated_hard.yaml` | market_generator presets (6 agents): measured difficulty, execution fees, the generator's ideal |
+| `experiments/generated_fragile.yaml` | market_generator `goal_relevant_fragile` family: one bad first purchase makes the market unwinnable; fragility analysed |
+| `experiments/local_generated.yaml` | scripted agents, local mode: a small generated market, ledger reconciled every round |

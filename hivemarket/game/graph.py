@@ -28,8 +28,13 @@ need the token. In move mode it applies to every intermediate hop of a walk,
 including a needer (or former holder) that has to buy the token again to keep
 it moving; the hop into a stop where a needer is served costs only the edge.
 
+Execution fees (market.execution_fee) are burned on every exchange: they are
+added to every edge for routing and charged to each side's budget.
+
 Budgets are ignored, so `ideal` is a lower bound on what any successful round
-can spend; `budget_shortfalls` and `unreachable` qualify it.
+can spend; `budget_shortfalls` and `unreachable` qualify it. Generated games
+(market_generator) use the generator's budget-aware solution as the ideal
+instead, and keep this one alongside as `graph_ideal` (hivemarket/game/generated.py).
 """
 
 from __future__ import annotations
@@ -47,9 +52,14 @@ INF = float("inf")
 # ------------------------------------------------------------------ building
 
 def build_graph(cfg: ExperimentConfig, agent_ids: list[str]) -> tuple[GraphSpec, dict[str, list[str]]]:
-    """Explicit `graph`, or one compiled from the `tasks` generator. Returns (graph, impossible-by-agent)."""
+    """Explicit `graph`, or one compiled from `secret_assembly`. Returns (graph, impossible-by-agent).
+
+    market_generator games carry more than a graph; they are built by hivemarket.game.generated.
+    """
     if cfg.graph:
         return cfg.graph, {}
+    if cfg.generated:
+        raise ValueError("market_generator games are built with hivemarket.game.generated.build_world")
     return _secret_assembly(cfg, agent_ids)
 
 
@@ -306,9 +316,14 @@ def _move_walks(costs: dict[tuple[str, str], int], comm: int, holders: list[str]
 
 
 def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
-               token_transfer: Literal["move", "copy"] = "move") -> dict[str, Any]:
+               token_transfer: Literal["move", "copy"] = "move",
+               execution_fee: dict[str, int] | None = None) -> dict[str, Any]:
+    """`execution_fee` ({buyer, seller}) is burned on every exchange: it weighs on routing and on each side's
+    budget, while `exchanges` keep listing the edge price."""
+    fee_b, fee_s = (execution_fee or {}).get("buyer", 0), (execution_fee or {}).get("seller", 0)
     nodes = list(graph.nodes)
     costs = graph.edge_costs()
+    weights = {e: c + fee_b + fee_s for e, c in costs.items()}  # what an exchange really costs
     tokens = sorted({t for n in graph.nodes.values() for t in n.needs})
     per_token: dict[str, Any] = {}
     unreachable: list[dict[str, str]] = []
@@ -329,7 +344,7 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
         if not terms:
             continue
         if token_transfer == "move":
-            cost, walks, covered = _move_walks(costs, communication_cost, sorted(holders), terms)
+            cost, walks, covered = _move_walks(weights, communication_cost, sorted(holders), terms)
             unreachable += [{"node": n, "token": tok, "reason": NO_SINGLE_CHAIN} for n in terms if n not in covered]
             hops = [hp for w in walks for hp in w["hops"]]
             relay_hops = [v for _, v, is_relay in hops if is_relay]
@@ -343,7 +358,7 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
             }
         else:
             weight = {(u, v): c + (communication_cost if v not in holders and v not in needers else 0)
-                      for (u, v), c in costs.items()}
+                      for (u, v), c in weights.items()}
             cost, tree = _steiner(nodes, weight, holders, terms)
             relays = sorted({v for _, v in tree if v not in needers and v not in holders})
             per_token[tok] = {
@@ -358,7 +373,8 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     spend: dict[str, int] = {}
     for info in per_token.values():
         for x in info["exchanges"]:
-            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"]
+            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + fee_b
+            spend[x["from"]] = spend.get(x["from"], 0) + fee_s
     shortfalls = {n: c - graph.nodes[n].credits for n, c in spend.items() if c > graph.nodes[n].credits}
     return {
         "solvable": not unreachable,
@@ -374,15 +390,23 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     }
 
 
-def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str, list[str]]) -> dict[str, Any]:
+def graph_ideal(graph: GraphSpec, cfg: ExperimentConfig, execution_fee: dict[str, int]) -> dict[str, Any]:
+    """`ideal_cost` under the experiment's rules, execution fees included."""
+    return ideal_cost(graph, cfg.communication_cost, cfg.market.token_transfer, execution_fee)
+
+
+def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str, list[str]], *,
+                   execution_fee: dict[str, int] | None = None, ideal: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The world file the broker runs. `execution_fee` and `ideal` default to the config's fee and `graph_ideal`."""
     costs = graph.edge_costs()
+    fee = execution_fee or cfg.market.execution_fee.model_dump()
     return {
         "nodes": {n: spec.model_dump() for n, spec in graph.nodes.items()},
         "edges": [{"from": s, "to": d, "cost": c} for (s, d), c in sorted(costs.items())],
         "communication_cost": cfg.communication_cost,
         "seed": cfg.seed,
         "rounds": cfg.rounds.model_dump() | {"round_seconds": cfg.round_seconds},
-        "ideal": ideal_cost(graph, cfg.communication_cost, cfg.market.token_transfer),
+        "ideal": ideal if ideal is not None else graph_ideal(graph, cfg, fee),
         "impossible": impossible,  # generator ground truth; not exposed to agents
         "rules": {
             "allow_broadcast": cfg.market.allow_broadcast,
@@ -390,5 +414,6 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "max_submissions": cfg.market.max_submissions,
             "token_transfer": cfg.market.token_transfer,
             "order_timeout_seconds": cfg.market.order_timeout_seconds,
+            "execution_fee": fee,
         },
     }

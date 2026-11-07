@@ -169,6 +169,7 @@ class ScriptedProvider:
 
     def _acquire(self) -> Turn:
         available = self.status.get("credits_available", self.status.get("credits", 0))
+        fee = (self.status.get("execution_fee") or {}).get("buyer", 0)  # set aside with the price
         sellers = self.graph.get("you_can_buy_from", [])
         ordering = set(self.my_orders.values())
         calls, unreachable = [], []
@@ -176,12 +177,12 @@ class ScriptedProvider:
             if tok in ordering:
                 continue  # an order for it is still open
             # Holdings are private, so try affordable neighbours cheapest first, one per pass.
-            options = sorted((s for s in sellers if s["cost"] <= available), key=lambda s: (s["cost"], s["node"]))
+            options = sorted((s for s in sellers if s["cost"] + fee <= available), key=lambda s: (s["cost"], s["node"]))
             n = self.tries.get(tok, 0)
             if n < len(options):
                 self.tries[tok] = n + 1
                 calls.append(self._call("place_order", token=tok, seller=options[n]["node"]))
-                available -= options[n]["cost"]
+                available -= options[n]["cost"] + fee
             else:
                 unreachable.append(tok)
         if calls:
