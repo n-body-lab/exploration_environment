@@ -8,6 +8,7 @@ events     one row per event from every source, the common envelope; `data` is t
            offer_failed, exchange, message, submission,
            stuck_declared, round_end, game_over (see hivemarket/market/state.py).
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
+           For market_generator games `world` carries the generator's difficulty (v_run_difficulty).
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
 analysis   outputs of `hivemarket analyze` (backchannel, signal, exploration_action, exploration_summary);
            replaced wholesale whenever a run is re-analysed.
@@ -110,6 +111,8 @@ STATEMENTS = [
            JSONExtractString(data, 'seller') AS seller,
            JSONExtractString(data, 'token') AS token,
            JSONExtractInt(data, 'cost') AS cost,
+           JSONExtractInt(data, 'buyer_fee') AS buyer_fee,
+           JSONExtractInt(data, 'seller_fee') AS seller_fee,
            JSONExtractBool(data, 'relay') AS relay,
            JSONExtractString(data, 'offer_id') AS offer_id
     FROM {DATABASE}.events FINAL
@@ -161,7 +164,10 @@ STATEMENTS = [
            JSONExtractInt(data, 'credits_spent') AS credits_spent,
            JSONExtractInt(data, 'credits_spent_on_exchanges') AS credits_on_tokens,
            JSONExtractInt(data, 'credits_spent_on_communication') AS credits_on_messages,
+           JSONExtractInt(data, 'credits_spent_on_fees') AS credits_on_fees,
            JSONExtract(data, 'ideal_credits', 'Nullable(Int64)') AS ideal_credits,
+           JSONExtractString(data, 'ideal_status') AS ideal_status,
+           JSONExtractString(data, 'economic_validation', 'status') AS economic_validation,
            JSONExtract(data, 'excess_over_ideal', 'Nullable(Int64)') AS excess_over_ideal,
            JSONExtractFloat(data, 'duration_s') AS duration_s,
            JSONExtractUInt(data, 'messages') AS messages,
@@ -293,5 +299,51 @@ STATEMENTS = [
            JSONExtract(data, 'categories', 'Array(String)') AS categories,
            JSONExtractString(data, 'detail') AS detail
     FROM {DATABASE}.analysis WHERE kind = 'exploration_action'
+    """,
+    # market_generator games: each round's final economic validation, from the run's summary. v_rounds has
+    # the broker's own check, which is `unavailable` in Docker (no generator in the market image);
+    # `hivemarket report` completes it on the host (checked_by = 'report') and this view picks that up.
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_round_validation AS
+    SELECT run_id,
+           JSONExtractUInt(r, 'round') AS round,
+           JSONExtractString(r, 'economic_validation', 'status') AS status,
+           JSONExtractString(r, 'economic_validation', 'checked_by') AS checked_by,
+           JSONExtractString(r, 'economic_validation', 'error') AS error
+    FROM {DATABASE}.runs FINAL
+    ARRAY JOIN JSONExtractArrayRaw(summary, 'rounds') AS r
+    WHERE JSONHas(r, 'economic_validation')
+    """,
+    # market_generator games: the generator's measured difficulty and benchmark, one row per run,
+    # read from world.json (`generated`, `ideal`), so behaviour can be compared across easy/hard and
+    # robust/fragile markets. Runs with a hand-written or secret_assembly game have no row.
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_run_difficulty AS
+    SELECT run_id, experiment,
+           JSONExtractString(world, 'generated', 'source', 'preset') AS preset,
+           JSONExtractString(world, 'generated', 'source', 'family') AS family,
+           JSONExtractUInt(world, 'generated', 'n_agents') AS n_agents,
+           JSONExtractUInt(world, 'generated', 'n_tokens') AS n_tokens,
+           JSONExtractString(world, 'ideal', 'ideal_status') AS ideal_status,
+           JSONExtract(world, 'ideal', 'ideal_credits', 'Nullable(Int64)') AS ideal_credits,
+           JSONExtract(world, 'ideal', 'graph_ideal', 'ideal_credits', 'Nullable(Int64)') AS graph_ideal_credits,
+           JSONExtractFloat(world, 'generated', 'properties', 'routing', 'indirect_dependency_fraction')
+               AS indirect_dependency_fraction,
+           JSONExtractFloat(world, 'generated', 'properties', 'routing', 'mean_dependency_depth') AS mean_dependency_depth,
+           JSONExtractFloat(world, 'generated', 'properties', 'interdependence', 'shared_demand_fraction')
+               AS shared_demand_fraction,
+           JSONExtractFloat(world, 'generated', 'properties', 'interdependence', 'ownership_hhi') AS ownership_hhi,
+           JSONExtractFloat(world, 'generated', 'properties', 'resources', 'limited_slack_fraction')
+               AS limited_slack_fraction,
+           JSONExtractFloat(world, 'generated', 'properties', 'alternatives', 'competitive_alternative_fraction')
+               AS competitive_alternative_fraction,
+           JSONExtract(world, 'generated', 'fragility', 'goal_relevant_fragility', 'Nullable(Float64)')
+               AS goal_relevant_fragility,
+           JSONExtract(world, 'generated', 'fragility', 'full_affordable_action_fragility', 'Nullable(Float64)')
+               AS full_affordable_action_fragility,
+           JSONExtractString(world, 'generated', 'impossibility', 'conclusion') AS impossibility_conclusion,
+           JSONExtractRaw(world, 'generated', 'properties') AS properties
+    FROM {DATABASE}.runs FINAL
+    WHERE JSONHas(world, 'generated')
     """,
 ]

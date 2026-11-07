@@ -1,5 +1,6 @@
 """Shipper -> ClickHouse/object storage, against a real ClickHouse engine (chDB) behind a fake HTTP endpoint."""
 
+import importlib.util
 import json
 import re
 import shutil
@@ -76,7 +77,9 @@ def finished_run(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def engine(tmp_path_factory):
-    return ChdbHTTP(tmp_path_factory.mktemp("ch"))  # chDB allows one embedded server per process
+    engine = ChdbHTTP(tmp_path_factory.mktemp("ch"))  # chDB allows one embedded server per process
+    yield engine
+    engine.s.close()  # release it now, not whenever garbage collection gets to it, so another module can open one
 
 
 @pytest.fixture
@@ -192,3 +195,31 @@ def test_market_probes_reach_the_warehouse(engine, probe_run):
     levels = client.query_json(f"SELECT kind, level FROM hivemarket.v_offchannel WHERE run_id = '{probe_run.name}'")
     assert sorted((r["kind"], r["level"]) for r in levels) == [
         ("admin_request", "probe"), ("admin_request", "strong"), ("invalid_request", "probe"), ("invalid_request", "probe")]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("hivemarket_generator") is None,
+                    reason='market_generator is not installed: pip install -e ".[generator]"')
+def test_generated_run_difficulty_reaches_the_warehouse(ch, tmp_path):
+    import asyncio
+
+    run_dir = create_run(ROOT / "experiments" / "local_generated.yaml", tmp_path, mode="local", local_base_port=20000)
+    asyncio.run(run_local(run_dir))
+    write_report(run_dir)
+    client = ch
+    Shipper(run_dir, client, None).finish("finished")
+
+    where = f"WHERE run_id = '{run_dir.name}'"
+    [run] = client.query_json(f"SELECT * FROM hivemarket.v_run_difficulty {where}")
+    world = json.loads((run_dir / "world.json").read_text())
+    assert (run["n_agents"], run["n_tokens"], run["ideal_status"]) == (3, 4, "optimal")
+    assert run["ideal_credits"] == world["ideal"]["ideal_credits"]
+    assert run["shared_demand_fraction"] == world["generated"]["properties"]["interdependence"]["shared_demand_fraction"]
+    rounds = client.query_json(f"SELECT credits_on_fees, ideal_status, economic_validation FROM hivemarket.v_rounds {where}")
+    summary = json.loads((run_dir / "summary.json").read_text())["rounds"]
+    assert [(r["credits_on_fees"], r["ideal_status"], r["economic_validation"]) for r in rounds] == \
+        [(r["credits_spent_on_fees"], "optimal", "valid") for r in summary]
+    fees = client.query_json(f"SELECT sum(buyer_fee + seller_fee) AS fees FROM hivemarket.v_exchanges {where}")[0]["fees"]
+    assert fees == sum(r["credits_spent_on_fees"] for r in summary)
+    # the final per-round check comes from the run's summary (where the host completes Docker runs)
+    checks = client.query_json(f"SELECT round, status FROM hivemarket.v_round_validation {where} ORDER BY round")
+    assert [(c["round"], c["status"]) for c in checks] == [(r["round"], "valid") for r in summary]

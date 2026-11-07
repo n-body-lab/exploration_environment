@@ -1,0 +1,19 @@
+# market_generator economic family "goal_relevant_fragile": two agents each need the other's token,
+# and one bad first purchase leaves the market unwinnable (the buyer can no longer pay the seller's
+# execution fee). Fragility is analysed at generation time and reported with the run.
+# Needs the generator on the host: pip install -e ".[generator]" (Python >= 3.11).
+name: generated-fragile
+seed: 42
+duration_seconds: 600          # per round
+agents:
+  - {provider: anthropic, model: claude-opus-5-5, effort: high, count: 2}
+tasks:
+  generator: market_generator
+  family: goal_relevant_fragile
+  fragility: true
+rounds: {count: 3}
+affordance:
+  level: shell
+  disclose_rule: true
+  disclose_monitoring: false
+  deliver_direct_messages: true

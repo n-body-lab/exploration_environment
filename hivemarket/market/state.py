@@ -18,6 +18,9 @@ Runs the graph game over one or more rounds and keeps the ledger.
              hands: the seller no longer holds it but still knows its content. With
              token_transfer=copy the seller keeps a copy. Any node can sell what it holds,
              including tokens it bought (relays).
+  fee        every completed sale burns `execution_fee` credits, on top of the price: `buyer`
+             from the buyer and `seller` from the seller (default 0). Both are reserved when the
+             SELL starts, so the seller can't pay its fee out of the sale, and burned on BUY.
   message    only when rules.messages is on (off by default: offers are the communication
              channel). The sender burns `communication_cost` credits per recipient.
   submit     a node with needs submits the contents of its needed tokens, in order,
@@ -35,6 +38,8 @@ have a total causal order even when timestamps tie.
 At the end of a round the broker tells every agent the outcome, the credits spent
 and the ideal credits, then (if rounds remain) starts the next round with the same
 graph, fresh credits and holdings, and new token contents. Agent sessions persist.
+For a market_generator game it also reconciles the round's ordered ledger (offers, sales
+and messages) against the generator's economics (hivemarket.game.generated.reconcile).
 
 Pure Python (no HTTP) so it can be unit tested; app.py adds the HTTP log.
 """
@@ -50,9 +55,15 @@ from typing import Any
 
 from hivemarket.common.config import GraphSpec
 from hivemarket.common.events import EventLog, now
+from hivemarket.game.generated import reconcile
 from hivemarket.game.graph import token_contents
 
 LIVE = ("open", "pending")  # offer states that can still lead to a sale; pending = SELL->BUY in progress
+
+
+def seller_fee_key(offer_id: str) -> str:
+    """Escrow key for the seller's execution fee on a pending sale (the buyer's escrow is keyed by offer id)."""
+    return f"fee:{offer_id}"
 
 
 class MarketError(Exception):
@@ -98,7 +109,10 @@ class Broker:
         self.sale_timeout = float(rules.get("sale_timeout_seconds", 90.0))
         self.offer_tax = int(rules.get("offer_tax", 1))
         self.messages_enabled = bool(rules.get("messages", False))
+        fee = rules.get("execution_fee") or {}
+        self.fee = {"buyer": int(fee.get("buyer", 0)), "seller": int(fee.get("seller", 0))}
         self.ideal = world.get("ideal", {})
+        self.generated = world.get("generated")  # market_generator games: reconcile every round
         self.agents = list(self.spec)
         self.solvers = [n for n, s in self.spec.items() if s["needs"]]
 
@@ -133,6 +147,9 @@ class Broker:
         self.stuck: list[dict[str, Any]] = []
         self.exchanges: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
+        # Offers, sales and messages in the order they happened (all under the lock): the round's
+        # economic ledger, reconciled against market_generator at round end.
+        self.ledger: list[dict[str, Any]] = []
         self.contents: dict[str, str] = {}
         self.round_started_at = now()
         self.round_deadline = self.round_started_at + self.round_seconds
@@ -181,11 +198,12 @@ class Broker:
         paid = sum(x["cost"] for x in self.exchanges)
         messages = sum(m["cost"] for m in self.messages)
         taxes = sum(x["cost"] for x in self.taxes)
-        return {"total": paid + messages + taxes, "exchanges": paid, "communication": messages + taxes,
-                "offers": taxes, "messages": messages}
+        fees = sum(x["buyer_fee"] + x["seller_fee"] for x in self.exchanges)
+        return {"total": paid + messages + taxes + fees, "exchanges": paid, "communication": messages + taxes,
+                "offers": taxes, "messages": messages, "fees": fees}
 
     def _credits_check(self, burned: int) -> dict[str, Any]:
-        """Exchanges move credits between agents; only offer taxes and messages destroy them."""
+        """Exchanges move credits between agents; only offer taxes, messages and execution fees destroy them."""
         start = sum(int(s["credits"]) for s in self.spec.values())
         now_total = sum(self.credits.values())
         return {"start_total": start, "burned": burned, "remaining_total": now_total,
@@ -205,6 +223,8 @@ class Broker:
                 "spent_on_tokens": sum(x["cost"] for x in self.exchanges if x["buyer"] == n),
                 "spent_on_messages": sum(m["cost"] for m in self.messages if m["sender"] == n),
                 "spent_on_offers": sum(x["cost"] for x in self.taxes if x["buyer"] == n),
+                "spent_on_fees": sum(x["buyer_fee"] * (x["buyer"] == n) + x["seller_fee"] * (x["seller"] == n)
+                                     for x in self.exchanges),
                 "received": sum(x["cost"] for x in self.exchanges if x["seller"] == n),
                 "credits_left": self.credits[n],
                 "completed": n in self.completed,
@@ -232,38 +252,47 @@ class Broker:
             "credits_spent_on_communication": spent["communication"],
             "credits_spent_on_offers": spent["offers"],
             "credits_spent_on_messages": spent["messages"],
+            "credits_spent_on_fees": spent["fees"],
             "ideal_credits": ideal,
+            "ideal_status": self.ideal.get("ideal_status"),  # generated games: optimal | feasible | limit_reached
             "solvable": self.ideal.get("solvable"),
             "excess_over_ideal": spent["total"] - ideal if (ideal is not None and outcome == "pass") else None,
             "completed": sorted(self.completed),
             "stuck": self.stuck,
             "per_agent": per_agent,
             "credits_remaining": dict(self.credits),
-            "credits_check": self._credits_check(spent["communication"]),
+            "credits_check": self._credits_check(spent["communication"] + spent["fees"]),
             "who_spoke_to_whom": {k: dict(v) for k, v in talk.items()},
             "exchanges": self.exchanges,
             "messages": len(self.messages),
             "offers": dict(offer_states),
-            # the spec's collective objective, in priority order: (communication, transactions, payments)
-            "objective": [spent["communication"], len(self.exchanges), spent["exchanges"]],
+            # the spec's collective objective, in priority order: (communication, transactions, payments).
+            # Execution fees count as communication, as in market_generator's (execution messages, ...).
+            "objective": [spent["communication"] + spent["fees"], len(self.exchanges), spent["exchanges"]],
         }
+        reconciliation: dict[str, Any] = {}
+        if self.generated:
+            reconciliation = {"ledger": self.ledger, "end_state": self._end_state()}
+            result["economic_validation"] = reconcile(self.generated, **reconciliation)
         self.results.append(result)
         self.log.emit("round_end", **result)
         if self.run_dir:
             out = self.run_dir / "rounds"
             out.mkdir(exist_ok=True)
+            # A generated game's file also carries what `hivemarket report` needs to reconcile the
+            # round on the host when the market process couldn't (no generator in its image).
             (out / f"round-{self.round_no}.json").write_text(json.dumps(
                 {**result, "message_log": self.messages, "offer_log": list(self.offers.values()),
-                 "token_contents": self.contents}, indent=2, default=str))
+                 "token_contents": self.contents, **reconciliation}, indent=2, default=str))
 
         self.phase = "between"  # stop actions while we announce
         self._record_state("round_end", None, outcome=outcome, reason=reason)
 
         last = self.round_no >= self.rounds_total or (outcome == "pass" and self.stop_on_pass)
-        ideal_txt = f"{ideal} credits" if ideal is not None else "not solvable as configured"
+        fees_txt = f", execution fees {spent['fees']}" if any(self.fee.values()) else ""
         body = (f"Round {self.round_no} of {self.rounds_total} is over: {outcome.upper()} ({reason}). "
                 f"Credits spent this round: {spent['total']} (tokens {spent['exchanges']}, offers "
-                f"{spent['offers']}, messages {spent['messages']}). Ideal cost to solve: {ideal_txt}.")
+                f"{spent['offers']}, messages {spent['messages']}{fees_txt}). Ideal cost to solve: {self._ideal_text()}.")
         if last:
             await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
                                 outcome=outcome)
@@ -280,6 +309,23 @@ class Broker:
         async with self._cond:
             self._cond.notify_all()
         return result
+
+    def _ideal_text(self) -> str:
+        """The ideal as agents are told it. A generated game's is the generator's plan, which minimises
+        communication and trades first and prices second, so it says that, and whether it is proven optimal."""
+        ideal, status = self.ideal.get("ideal_credits"), self.ideal.get("ideal_status")
+        if ideal is None:
+            return "unknown (no solution found)" if status == "unknown" else "not solvable as configured"
+        if status == "optimal":
+            return f"{ideal} credits (a proven-optimal plan: fewest trades, then lowest prices)"
+        if status in ("feasible", "limit_reached"):
+            return f"{ideal} credits (the best plan found: fewest trades, then lowest prices; not proven optimal)"
+        return f"{ideal} credits"
+
+    def _end_state(self) -> dict[str, Any]:
+        """Balances, holdings and what each agent has seen: the round's final state, for reconciliation."""
+        return {"credits": dict(self.credits), "holdings": {n: sorted(h) for n, h in self.holds.items()},
+                "known": {n: sorted(k) for n, k in self.known.items()}}
 
     async def _check_progress(self) -> None:
         if self.phase != "active":
@@ -298,7 +344,9 @@ class Broker:
         if o["status"] == "pending":
             return True
         return (o["status"] == "open" and o["token"] in self.holds[o["seller"]] and o["token"] not in self.reserved
-                and o["token"] not in self.holds[o["buyer"]] and self.available(o["buyer"]) >= o["price"])
+                and o["token"] not in self.holds[o["buyer"]]
+                and self.available(o["buyer"]) >= o["price"] + self.fee["buyer"]
+                and self.available(o["seller"]) >= self.fee["seller"])
 
     # ------------------------------------------------------------- helpers
 
@@ -397,6 +445,7 @@ class Broker:
             "offers_made": [self._offer_view(o) for o in self.offers.values() if o["buyer"] == agent_id],
             "offers_received": [self._offer_view(o) for o in self.offers.values() if o["seller"] == agent_id],
             "offer_tax": self.offer_tax,
+            "execution_fee": dict(self.fee),  # burned per completed sale, by buyer and by seller
             "sale_timeout_seconds": self.sale_timeout,
             "task": self._task(agent_id),
             "task_completed": agent_id in self.completed,
@@ -462,6 +511,7 @@ class Broker:
         if self.reserved.get(o["token"]) == o["offer_id"]:
             del self.reserved[o["token"]]
         self.escrow[o["buyer"]].pop(o["offer_id"], None)
+        self.escrow[o["seller"]].pop(seller_fee_key(o["offer_id"]), None)
 
     @atomic
     async def make_offer(self, agent_id: str, token: str, seller: str) -> dict[str, Any]:
@@ -501,6 +551,8 @@ class Broker:
         self.credits[agent_id] -= self.offer_tax
         self.taxes.append({"ts": now(), "round": self.round_no, "buyer": agent_id, "offer_id": oid,
                            "cost": self.offer_tax})
+        self.ledger.append({"kind": "offer", "buyer": agent_id, "seller": seller, "offer_id": oid,
+                            "tax": self.offer_tax})
         if self.offer_tax:
             self._record_balances("offer_tax", {agent_id: -self.offer_tax}, buyer=agent_id, offer_id=oid)
         # Observer-only: whether the seller holds the token, or held it earlier this round (#7, #12).
@@ -561,25 +613,34 @@ class Broker:
                  reserved_for=self.reserved[tok])
         if tok in self.holds[buyer]:
             fail(409, "buyer_holds_token", f"{buyer} already holds {tok}. The offer stays open.")
-        if price > self.available(buyer):
+        fee_b, fee_s = self.fee["buyer"], self.fee["seller"]
+        cost = price + fee_b  # what the buyer must have: the price plus its execution fee
+        if cost > self.available(buyer):
             # Tell the buyer too: it learns that a seller is ready, and that it needs credits.
             self.log.emit("sale_unaffordable", agent_id=agent_id, offer_id=offer_id, round=self.round_no,
                           buyer=buyer, seller=agent_id, token=tok, price=price, buyer_available=self.available(buyer))
-            await self._publish(buyer, f"{agent_id} tried to sell you {tok} for {price} credits (offer {offer_id}), "
-                                       f"but you have {self.available(buyer)} available. The offer stays open.",
+            fee = f" (price {price} + execution fee {fee_b})" if fee_b else ""
+            await self._publish(buyer, f"{agent_id} tried to sell you {tok} for {cost} credits{fee} (offer "
+                                       f"{offer_id}), but you have {self.available(buyer)} available. The offer "
+                                       "stays open.",
                                 event="sale_unaffordable", offer_id=offer_id, token=tok, seller=agent_id, price=price)
-            fail(402, "buyer_cannot_pay", f"{buyer} can't pay {price} credits right now. The offer stays open.")
+            fail(402, "buyer_cannot_pay", f"{buyer} can't pay {cost} credits right now. The offer stays open.")
+        if fee_s > self.available(agent_id):  # paid before the sale, so not out of its proceeds
+            fail(402, "insufficient_credits", f"Selling burns an execution fee of {fee_s} credits from you; you have "
+                                              f"{self.available(agent_id)} available. The offer stays open.")
 
         t = now()
         o.update(status="pending", sale_started_at=t, expires_at=t + self.sale_timeout,
                  sales_started=o["sales_started"] + 1)
         self.reserved[tok] = offer_id
-        self.escrow[buyer][offer_id] = price
+        self.escrow[buyer][offer_id] = cost
+        if fee_s:
+            self.escrow[agent_id][seller_fee_key(offer_id)] = fee_s
         self.log.emit("sale_started", agent_id=agent_id, offer_id=offer_id, round=self.round_no, buyer=buyer,
                       seller=agent_id, token=tok, price=price, expires_at=o["expires_at"])
         self._record_state("sale_started", agent_id, offer_id=offer_id)
         await self._publish(buyer, f"{agent_id} is selling you {tok} for {price} credits (offer {offer_id}). "
-                                   f"{price} credits are reserved; call buy(\"{offer_id}\") within "
+                                   f"{cost} credits are reserved; call buy(\"{offer_id}\") within "
                                    f"{int(self.sale_timeout)}s to complete it, or withdraw the offer.",
                             event="sale_started", offer_id=offer_id, token=tok, seller=agent_id, price=price)
         return {"ok": True, "offer_id": offer_id, "status": "pending", "token_reserved": tok,
@@ -595,15 +656,17 @@ class Broker:
                                f"Offer {offer_id} is {o['status']}: there is no sale to complete. A seller has to "
                                "sell first.", offer_id=offer_id, offer_status=o["status"])
         tok, seller, cost = o["token"], o["seller"], o["price"]
-        # Guaranteed by the reservation: the seller still holds the token and the buyer can pay.
-        # Checked anyway, so a broken invariant can't corrupt the ledger.
+        fee_b, fee_s = self.fee["buyer"], self.fee["seller"]
+        # Guaranteed by the reservation: the seller still holds the token, the buyer can pay the price and
+        # its fee, and the seller its fee. Checked anyway, so a broken invariant can't corrupt the ledger.
         assert self.reserved.get(tok) == offer_id and tok in self.holds[seller], (offer_id, self.reserved)
-        assert self.escrow[agent_id].get(offer_id) == cost, (offer_id, self.escrow[agent_id])
+        assert self.escrow[agent_id].get(offer_id) == cost + fee_b, (offer_id, self.escrow[agent_id])
+        assert self.escrow[seller].get(seller_fee_key(offer_id), 0) == fee_s, (offer_id, self.escrow[seller])
 
         self._release(o)
         o.update(status="executed", closed_at=now())
-        self.credits[agent_id] -= cost
-        self.credits[seller] += cost
+        self.credits[agent_id] -= cost + fee_b
+        self.credits[seller] += cost - fee_s
         self.holds[agent_id].add(tok)
         self.known[agent_id].add(tok)
         moved = self.token_transfer == "move"
@@ -612,10 +675,13 @@ class Broker:
         self.acquired[agent_id][tok] = {"from": seller, "cost": cost, "ts": now()}
         relay = tok not in self.spec[seller]["holds"]  # seller had bought it
         record = {"ts": now(), "round": self.round_no, "buyer": agent_id, "seller": seller, "token": tok,
-                  "cost": cost, "relay": relay, "moved": moved, "offer_id": offer_id}
+                  "cost": cost, "buyer_fee": fee_b, "seller_fee": fee_s, "relay": relay, "moved": moved,
+                  "offer_id": offer_id}
         self.exchanges.append(record)
-        self._record_balances("exchange", {agent_id: -cost, seller: cost}, buyer=agent_id, seller=seller, token=tok,
-                              offer_id=offer_id)
+        self.ledger.append({"kind": "transfer", "buyer": agent_id, "seller": seller, "token": tok, "price": cost,
+                            "buyer_fee": fee_b, "seller_fee": fee_s, "offer_id": offer_id})
+        self._record_balances("exchange", {agent_id: -(cost + fee_b), seller: cost - fee_s}, buyer=agent_id,
+                              seller=seller, token=tok, offer_id=offer_id)
         self.log.emit("sale_completed", agent_id=agent_id, offer_id=offer_id, round=self.round_no, buyer=agent_id,
                       seller=seller, token=tok, price=cost)
         self.log.emit("exchange", agent_id=agent_id, **record, buyer_credits=self.credits[agent_id],
@@ -623,14 +689,16 @@ class Broker:
         self._record_state("exchange", agent_id, buyer=agent_id, seller=seller, token=tok, cost=cost,
                            offer_id=offer_id)
         note = " You no longer hold it, but you still know its content." if moved else ""
+        fee_note = f" Your execution fee of {fee_s} credits was burned." if fee_s else ""
         await self._publish(seller, f"Transaction complete: {agent_id} bought {tok} from you for {cost} credits "
-                                    f"(offer {offer_id}).{note}",
+                                    f"(offer {offer_id}).{fee_note}{note}",
                             event="sale", offer_id=offer_id, token=tok, buyer=agent_id, cost=cost)
         await self._check_progress()
         others = sorted(x["offer_id"] for x in self.offers.values()
                         if x["buyer"] == agent_id and x["token"] == tok and x["status"] in LIVE)
         return {"ok": True, "offer_id": offer_id, "status": "executed", "token": tok, "content": self.contents[tok],
-                "cost": cost, "credits": self.credits[agent_id], "credits_available": self.available(agent_id),
+                "cost": cost, "execution_fee": fee_b, "credits": self.credits[agent_id],
+                "credits_available": self.available(agent_id),
                 # still open, as the spec wants; withdraw them if you no longer need the token
                 "your_other_open_offers_for_this_token": others}
 
@@ -696,6 +764,7 @@ class Broker:
         record = {"ts": now(), "round": self.round_no, "sender": agent_id, "to": to, "recipients": recipients,
                   "cost": cost, "body": body}
         self.messages.append(record)
+        self.ledger.append({"kind": "message", "sender": agent_id, "recipients": recipients})
         if cost:
             self._record_balances("message", {agent_id: -cost}, sender=agent_id, recipients=recipients)
         self.log.emit("message", agent_id=agent_id, **record, credits=self.credits[agent_id],

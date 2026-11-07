@@ -37,7 +37,8 @@ MARKET_TOOLS = [
     ToolSpec("get_status",
              "Get the current round, your credits (total, available, and reserved for sales in progress), the "
              "tokens you hold and every token content you know (including tokens you have sold), the offers you "
-             "have made and received, your task, time left in the round, the costs and the list of participants.",
+             "have made and received, your task, time left in the round, the costs (offer tax, execution fee) "
+             "and the list of participants.",
              _obj({}, [])),
     ToolSpec("view_graph",
              "See who you can buy tokens from and at what price, and who can buy from you at what price. It does "
@@ -55,12 +56,13 @@ MARKET_TOOLS = [
     ToolSpec("sell",
              "Sell a token to a node that made you an offer for it. You must hold the token. This starts the sale: "
              "the token and the buyer's credits are reserved, and the buyer has a limited time to buy. If the "
-             "buyer doesn't, the reservation is released and the offer stays open.",
+             "buyer doesn't, the reservation is released and the offer stays open. If the market charges the "
+             "seller an execution fee (see get_status), you must have it available; it is reserved too.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("buy",
              "Complete a sale a seller has started on one of your offers. The token and its content are "
-             "transferred to you and the price is paid to the seller. Your other open offers stay open; withdraw "
-             "the ones you no longer need.",
+             "transferred to you and the price is paid to the seller; any execution fees are burned. Your other "
+             "open offers stay open; withdraw the ones you no longer need.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("send_message",
              "Send a message to another agent through the broker. Each message costs the communication cost in "

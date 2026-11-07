@@ -52,7 +52,7 @@
      "editorType": "sql",
      "format": 1,
      "queryType": "table",
-     "rawSql": "SELECT round, outcome, reason, credits_spent, credits_on_tokens, credits_on_messages, ideal_credits, excess_over_ideal, messages, duration_s FROM hivemarket.v_rounds WHERE run_id = '${run_id}' ORDER BY round"
+     "rawSql": "SELECT r.round AS round, r.outcome AS outcome, r.reason AS reason, r.credits_spent AS credits_spent, r.credits_on_tokens AS credits_on_tokens, r.credits_on_messages AS credits_on_messages, r.credits_on_fees AS credits_on_fees, r.ideal_credits AS ideal_credits, r.ideal_status AS ideal_status, r.excess_over_ideal AS excess_over_ideal, if(v.status != '', v.status, r.economic_validation) AS economic_validation, r.messages AS messages, r.duration_s AS duration_s FROM hivemarket.v_rounds AS r LEFT JOIN hivemarket.v_round_validation AS v ON r.run_id = v.run_id AND r.round = v.round WHERE r.run_id = '${run_id}' ORDER BY round"
     }
    ],
    "options": {

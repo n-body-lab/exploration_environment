@@ -28,8 +28,13 @@ need the token. In move mode it applies to every intermediate hop of a walk,
 including a needer (or former holder) that has to buy the token again to keep
 it moving; the hop into a stop where a needer is served costs only the edge.
 
+Execution fees (market.execution_fee) are burned on every exchange: they are
+added to every edge for routing and charged to each side's budget.
+
 Budgets are ignored, so `ideal` is a lower bound on what any successful round
-can spend; `budget_shortfalls` and `unreachable` qualify it.
+can spend; `budget_shortfalls` and `unreachable` qualify it. Generated games
+(market_generator) use the generator's budget-aware solution as the ideal
+instead, and keep this one alongside as `graph_ideal` (hivemarket/game/generated.py).
 """
 
 from __future__ import annotations
@@ -47,9 +52,14 @@ INF = float("inf")
 # ------------------------------------------------------------------ building
 
 def build_graph(cfg: ExperimentConfig, agent_ids: list[str]) -> tuple[GraphSpec, dict[str, list[str]]]:
-    """Explicit `graph`, or one compiled from the `tasks` generator. Returns (graph, impossible-by-agent)."""
+    """Explicit `graph`, or one compiled from `secret_assembly`. Returns (graph, impossible-by-agent).
+
+    market_generator games carry more than a graph; they are built by hivemarket.game.generated.
+    """
     if cfg.graph:
         return cfg.graph, {}
+    if cfg.generated:
+        raise ValueError("market_generator games are built with hivemarket.game.generated.build_world")
     return _secret_assembly(cfg, agent_ids)
 
 
@@ -306,14 +316,18 @@ def _move_walks(costs: dict[tuple[str, str], int], comm: int, holders: list[str]
 
 
 def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
-               token_transfer: Literal["move", "copy"] = "move", transfer_tax: int = 0) -> dict[str, Any]:
+               token_transfer: Literal["move", "copy"] = "move", transfer_tax: int = 0,
+               execution_fee: dict[str, int] | None = None) -> dict[str, Any]:
     """`communication_cost`: what asking a relay to pass a token on costs (one message).
     `transfer_tax`: what every transfer costs on top of its price (the offer tax: each purchase
     needs at least one offer). With offers, a relay is asked by the offer itself, so runs use
-    communication_cost=0 and transfer_tax=offer_tax."""
+    communication_cost=0 and transfer_tax=offer_tax.
+    `execution_fee` ({buyer, seller}): burned on every transfer too; it weighs on routing and on each
+    side's budget. `exchanges` keep listing the edge price and the tax."""
+    fee_b, fee_s = (execution_fee or {}).get("buyer", 0), (execution_fee or {}).get("seller", 0)
     nodes = list(graph.nodes)
     edge_price = graph.edge_costs()
-    costs = {k: c + transfer_tax for k, c in edge_price.items()}  # what a transfer costs in all
+    costs = {k: c + transfer_tax + fee_b + fee_s for k, c in edge_price.items()}  # what a transfer costs in all
     tokens = sorted({t for n in graph.nodes.values() for t in n.needs})
     per_token: dict[str, Any] = {}
     unreachable: list[dict[str, str]] = []
@@ -365,7 +379,8 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     spend: dict[str, int] = {}
     for info in per_token.values():
         for x in info["exchanges"]:
-            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + x.get("tax", 0)
+            spend[x["to"]] = spend.get(x["to"], 0) + x["cost"] + x.get("tax", 0) + fee_b
+            spend[x["from"]] = spend.get(x["from"], 0) + fee_s
     shortfalls = {n: c - graph.nodes[n].credits for n, c in spend.items() if c > graph.nodes[n].credits}
     return {
         "solvable": not unreachable,
@@ -381,8 +396,18 @@ def ideal_cost(graph: GraphSpec, communication_cost: int = 0,
     }
 
 
-def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str, list[str]]) -> dict[str, Any]:
+def graph_ideal(graph: GraphSpec, cfg: ExperimentConfig, execution_fee: dict[str, int]) -> dict[str, Any]:
+    """`ideal_cost` under the experiment's rules: every transfer pays its price, the offer tax and the
+    execution fees, and relays are asked by offers (no separate message)."""
+    return ideal_cost(graph, 0, cfg.market.token_transfer, transfer_tax=cfg.market.offer_tax,
+                      execution_fee=execution_fee)
+
+
+def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str, list[str]], *,
+                   execution_fee: dict[str, int] | None = None, ideal: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The world file the broker runs. `execution_fee` and `ideal` default to the config's fee and `graph_ideal`."""
     costs = graph.edge_costs()
+    fee = execution_fee or cfg.market.execution_fee.model_dump()
     return {
         "nodes": {n: spec.model_dump() for n, spec in graph.nodes.items()},
         "edges": [{"from": s, "to": d, "cost": c} for (s, d), c in sorted(costs.items())],
@@ -390,7 +415,7 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
         "seed": cfg.seed,
         "rounds": cfg.rounds.model_dump() | {"round_seconds": cfg.round_seconds},
         # Offers are how demand travels (a relay is asked by an offer), so no separate relay message.
-        "ideal": ideal_cost(graph, 0, cfg.market.token_transfer, transfer_tax=cfg.market.offer_tax),
+        "ideal": ideal if ideal is not None else graph_ideal(graph, cfg, fee),
         "impossible": impossible,  # generator ground truth; not exposed to agents
         "rules": {
             "allow_broadcast": cfg.market.allow_broadcast,
@@ -400,5 +425,6 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "offer_tax": cfg.market.offer_tax,
             "messages": cfg.market.messages,
             "sale_timeout_seconds": cfg.market.sale_timeout_seconds,
+            "execution_fee": fee,
         },
     }
