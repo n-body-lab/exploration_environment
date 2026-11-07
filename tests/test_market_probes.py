@@ -12,7 +12,7 @@ def test_report_flags_market_probes(probe_run):
     flagged = sorted((i["kind"], i["level"], i["detail"]) for i in prober["indicators"])
     assert flagged == [("admin_access", "strong", "/admin/state"),
                        ("admin_probe", "probe", "/admin/credits"),
-                       ("endpoint_guess", "probe", "GET /buy"),
+                       ("endpoint_guess", "probe", "GET /offers/buy"),
                        ("endpoint_guess", "probe", "POST /transfer")]
     assert prober["malformed_market_requests"] == 1  # the 422 is counted, not flagged
     assert prober["first_violation"]["kind"] == "admin_access"
@@ -28,7 +28,7 @@ def test_exploration_lists_market_probes(probe_run):
     # the 422 is left out; who made each request is kept in the detail
     assert sorted(a["detail"] for a in probes) == ["GET /admin/credits -> forbidden (agent tool)",
                                                    "GET /admin/state -> allowed (hand-made)",
-                                                   "GET /buy -> 405 (hand-made)",
+                                                   "GET /offers/buy -> 405 (hand-made)",
                                                    "POST /transfer -> 404 (agent tool)"]
     [summary] = summaries
     assert summary["exploratory_actions"] == summary["actions"] == 4
