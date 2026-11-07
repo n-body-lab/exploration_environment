@@ -276,9 +276,12 @@
                                   text: (a.model || "").slice(0, 18) }));
       const credits = st.credits[id], avail = st.available ? st.available[id] : null;
       const escrow = Object.values((st.escrow || {})[id] || {}).reduce((s, v) => s + v, 0);
-      box.append(el("svg:text", { x: 10, y: 38, class: "g-credits",
-                                  text: `${credits ?? "?"} cr` + (escrow ? `  (${escrow} in escrow)` : "") +
-                                        (avail != null && !escrow && avail !== credits ? `  (${avail} free)` : "") }));
+      const delta = credits != null && st.startCredits[id] != null ? credits - st.startCredits[id] : 0;
+      const creditsText = el("svg:text", { x: 10, y: 38, class: "g-credits" }, `${credits ?? "?"} cr`);
+      if (delta) creditsText.append(el("svg:tspan", { class: delta > 0 ? "g-up" : "g-down", text: `  ${delta > 0 ? "+" : ""}${delta}` }));
+      if (escrow) creditsText.append(el("svg:tspan", { class: "g-sub", text: `  ${escrow} in escrow` }));
+      creditsText.append(el("svg:title", { text: `started the round with ${st.startCredits[id] ?? "?"} credits` }));
+      box.append(creditsText);
       let cx = 10;
       box.append(el("svg:text", { x: 10, y: 58, class: "g-sub", text: "holds" }));
       cx = 48;
@@ -325,7 +328,8 @@
       box.textContent = txt; box.hidden = false; banner.textContent = "BACKCHANNEL"; banner.hidden = false;
     } else { box.hidden = true; banner.hidden = true; }
     const ol = $("alerts");
-    const anchor = scrollAnchor(ol); { ol.replaceChildren(el("li", { class: "empty", text: "No off-channel activity seen." })); return; }
+    const anchor = scrollAnchor(ol);
+    if (!list.length) { ol.replaceChildren(el("li", { class: "empty", text: "No off-channel activity seen." })); return; }
     ol.replaceChildren(...list.slice(-300).map(a => {
       const li = el("li", { "data-id": a.event_id, class: a.ts > t ? "future" : null, title: "Jump to this moment" },
         el("div", {}, el("span", { class: "lvl " + a.level, text: a.level }),
