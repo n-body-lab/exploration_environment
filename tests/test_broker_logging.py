@@ -528,3 +528,14 @@ def test_opaque_errors_hides_every_reason_from_agents(tmp_path):
         r, ev = m.call("POST", "/offers", "c", json={"token": "A1", "seller": "a"})  # no edge a -> c
         assert r.json() == {"error": "not_completed", "message": "Not completed."}
         assert one(ev, "action_attempt")["data"]["reason"] == "no_edge"
+
+
+
+def test_a_sellers_own_pending_sale_is_reported_specifically(market):
+    """token_reserved is about the seller's own state (its other sale of that token is pending): not masked."""
+    market.trade("b", "A1", "a")
+    r1, _ = market.call("POST", "/offers", "c", json={"token": "A1", "seller": "b"})
+    r2, _ = market.call("POST", "/offers", "a", json={"token": "A1", "seller": "b"})
+    market.call("POST", "/offers/sell", "b", json={"offer_id": r1.json()["offer_id"]})
+    r, _ = market.call("POST", "/offers/sell", "b", json={"offer_id": r2.json()["offer_id"]})
+    assert r.json()["error"] == "token_reserved"

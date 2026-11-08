@@ -62,9 +62,10 @@ LIVE = ("open", "pending")  # offer states that can still lead to a sale; pendin
 # Why an offer can no longer be acted on, by its status (reason codes for the log, #32).
 CLOSED_REASON = {"executed": "offer_filled", "withdrawn": "offer_withdrawn", "cleared": "offer_cleared"}
 # Refusals whose specific reason or message would tell the caller about another agent's state (its
-# credits, holdings or pending sales). Agents get a generic "not_completed" instead; the log keeps the
-# reason. With rules.opaque_errors every refusal is generic.
-REVEALS_OTHERS = {"buyer_cannot_pay", "buyer_holds_token", "token_reserved"}
+# credits or holdings). Agents get a generic "not_completed" instead; the log keeps the reason. With
+# rules.opaque_errors every refusal is generic. (token_reserved isn't here: it only happens when the seller
+# itself already has a sale of that token pending, so it's about the caller's own state.)
+REVEALS_OTHERS = {"buyer_cannot_pay", "buyer_holds_token"}
 GENERIC_ERROR = {"error": "not_completed", "message": "Not completed."}
 
 
