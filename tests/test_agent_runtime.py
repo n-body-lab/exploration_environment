@@ -26,14 +26,13 @@ class FakeMarket:
 
 def runtime(batches):
     rt = AgentRuntime.__new__(AgentRuntime)  # skip the network setup in __init__
-    rt.cfg = SimpleNamespace(context=SimpleNamespace(reset_each_round=True),
-                             affordance=SimpleNamespace(deliver_direct_messages=True))
+    rt.cfg = SimpleNamespace(session="fresh", affordance=SimpleNamespace(deliver_direct_messages=True))
     rt.telemetry = SimpleNamespace(emit=lambda *a, **k: None)
     rt.inbox = SimpleNamespace(drain=lambda: [])
     rt.market = FakeMarket(batches)
     rt.cursor = rt.steps_in_round = 0
     rt.round_no, rt.last_round_ended, rt.round_deadline = 1, 0, None
-    rt.market_closed, rt.pending_checkpoint = False, None
+    rt.market_closed, rt.round_over = False, None
     return rt
 
 
@@ -45,17 +44,17 @@ async def test_round_end_and_start_in_one_batch_does_not_skip_a_round():
     # A slow model turn: round 1 ends and round 2 starts before the agent next polls.
     rt = runtime([[notice(1, "round_end", 1), notice(2, "round_start", 2)]])
     await rt._collect_events()
-    assert rt.round_no == 2 and rt.last_round_ended == 1 and rt.pending_checkpoint == "round_end"
+    assert rt.round_no == 2 and rt.last_round_ended == 1 and rt.round_over["round"] == 1
     await rt._await_round_start()
     assert rt.round_no == 2 and not rt.market_closed  # plays round 2 instead of waiting for round 3
 
 
-async def test_await_round_start_waits_for_next_round_and_drops_stale_checkpoint():
+async def test_await_round_start_waits_for_next_round_and_drops_stale_round_end():
     rt = runtime([[notice(1, "round_end", 1)], [notice(2, "round_start", 2)]])
     await rt._collect_events()
     assert rt.round_no == 1 and rt.last_round_ended == 1
     await rt._await_round_start()
-    assert rt.round_no == 2 and rt.pending_checkpoint is None
+    assert rt.round_no == 2 and rt.round_over is None
 
 
 async def test_reply_cut_off_while_reasoning_is_not_kept_in_history():

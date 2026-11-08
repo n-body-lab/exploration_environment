@@ -18,6 +18,13 @@ from pydantic import BaseModel, Field, model_validator
 #   direct_tool - plus an explicit direct_message tool and peer addresses
 AffordanceLevel = Literal["none", "shell", "shell_peers", "direct_tool"]
 
+# How an agent's session carries across rounds (an experimental condition; see hivemarket/agent/runtime.py).
+#   fresh      - a new session every round: no earlier conversation, no summaries, no memory tool
+#   memory     - one session for the whole experiment: the conversation continues into the next round
+#   reflection - as memory, and at each round end the agent reflects on the result; the reflection
+#                stays in its session for the next round
+SessionMode = Literal["fresh", "memory", "reflection"]
+
 
 class AgentSpec(BaseModel):
     model_config = {"extra": "forbid"}
@@ -279,22 +286,29 @@ class MemoryConfig(BaseModel):
 
 
 class ContextConfig(BaseModel):
-    """One context policy for every agent, so models are compared under the same memory conditions.
+    """One context budget for every agent, so models are compared under the same memory conditions.
 
-    Checkpoint & restart: the agent writes a summary for its future self (tools disabled), then
-    continues in a fresh conversation holding its summaries, its memory files and its current
-    status. Triggered at each round boundary and when a conversation passes
-    `reset_at_fraction` of `window_tokens`. A provider "context too long" error restarts
-    without a summary.
+    Checkpoint & restart: when a conversation passes `reset_at_fraction` of `window_tokens`, the
+    agent writes a summary for its future self (tools disabled), then continues in a fresh
+    conversation holding its summaries, its memory files and its current status. A provider
+    "context too long" error restarts without a summary. This happens in every `session` mode,
+    within a round; what happens at round boundaries is the experiment's `session`.
     """
 
     model_config = {"extra": "forbid"}
     window_tokens: int = 100_000  # budget for every agent: set to the smallest model's window
     reset_at_fraction: float = Field(default=0.75, gt=0, le=1)
-    reset_each_round: bool = True
     summary_chars: int = 3000  # cap per summary
     max_summaries: int = 6  # most recent summaries carried into a restart
     memory_chars_in_restart: int = 8000  # memory contents shown on restart (the rest via the memory tool)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _replaced(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "reset_each_round" in data:
+            raise ValueError("context.reset_each_round was replaced by the experiment's `session` setting "
+                             "(fresh | memory | reflection)")
+        return data
 
 
 class GatewayRoute(BaseModel):
@@ -321,6 +335,7 @@ class ExperimentConfig(BaseModel):
     communication_cost: int = Field(default=0, ge=0)
     rounds: RoundsConfig = Field(default_factory=RoundsConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
+    session: SessionMode = "memory"  # how each agent's session carries across rounds
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
@@ -342,10 +357,19 @@ class ExperimentConfig(BaseModel):
                                  f"{self.context.window_tokens}; keep it under a third of the window")
         if self.tasks.generator == "market_generator":
             self._check_generated()
+        if self.session == "fresh":
+            self._check_fresh()
         if self.communication_cost > 0 and not self.market.messages:
             warnings.warn(f"communication_cost is {self.communication_cost} but market.messages is off, so it has "
                           "no effect: set market.messages: true to price free-text messages", stacklevel=2)
         return self
+
+    def _check_fresh(self) -> None:
+        """Nothing carries across rounds in a fresh session, memory files included."""
+        if "enabled" in self.memory.model_fields_set and self.memory.enabled:
+            raise ValueError("session: fresh carries nothing across rounds, so it has no memory tool; "
+                             "remove memory.enabled or use session: memory | reflection")
+        self.memory.enabled = False
 
     def _check_generated(self) -> None:
         """A market_generator game runs under the generator's rules: unique tokens, and 1-credit messages
@@ -416,6 +440,8 @@ class AgentRuntimeConfig(BaseModel):
     watched: bool = False  # whether any other agent may read this agent's traces
     peers: dict[str, str] = Field(default_factory=dict)  # agent_id -> host:port, only when disclosed
     prompt_template: str
+    session: SessionMode = "memory"
+    reflection_template: str = ""  # session: reflection; prompts/reflection.md
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     max_tokens_param: str = "max_tokens"

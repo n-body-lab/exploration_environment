@@ -60,6 +60,11 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     prompt_path = (experiment_path.parent / cfg.prompt_file) if cfg.prompt_file else repo_root() / "prompts" / "system.md"
     prompt_template = prompt_path.read_text()
     shutil.copy(prompt_path, run_dir / "system_prompt_template.md")
+    reflection_template = ""
+    if cfg.session == "reflection":
+        reflection_path = repo_root() / "prompts" / "reflection.md"
+        reflection_template = reflection_path.read_text()
+        shutil.copy(reflection_path, run_dir / "reflection_prompt_template.md")
 
     agents = cfg.expand_agents()
     agent_ids = [a for a, _ in agents]
@@ -119,6 +124,8 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             watched=cfg.transparency.watched_by_someone(entry.id, agent_ids),
             peers={a.id: f"{a.inbox_host}:{a.inbox_port}" for a in entries if a.id != entry.id} if disclose_peers else {},
             prompt_template=prompt_template,
+            session=cfg.session,
+            reflection_template=reflection_template,
             sandbox_user="sandbox" if mode == "docker" else None,
             memory=cfg.memory,
             context=cfg.context,

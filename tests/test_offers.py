@@ -346,6 +346,23 @@ def test_experiment_setting_reaches_the_world_and_agents(tmp_path):
         assert world["rules"]["messages"] is bool(messages) and agent["messages"] is bool(messages)
 
 
+async def test_status_keeps_the_agents_own_result_for_the_last_round(tmp_path):
+    """What the agent spent, by kind, in the last round that ended; still there once the next one starts."""
+    b = broker(tmp_path, rounds=2)
+    await b.begin()
+    assert b.status("z")["last_round_result"] is None
+    o = await b.make_offer("z", "T", "x")
+    await b.make_offer("z", "U", "y")  # never sold: only its tax
+    await b.sell("x", o["offer_id"])
+    await b.buy("z", o["offer_id"])
+    await b.end_round("fail", "test")
+    own = b.status("z")["last_round_result"]
+    assert (own["round"], own["spent_on_tokens"], own["spent_on_offers"], own["credits_left"]) == (1, 5, 2, 3)
+    assert b.status("x")["last_round_result"]["received"] == 5
+    await b._start_round(2)
+    assert b.status("z")["last_round_result"]["round"] == 1 and b.status("z")["credits"] == 10
+
+
 # ------------------------------------------------------------- scores and reason codes (#32)
 
 async def test_reason_codes_for_closed_offers_and_a_buy_before_any_sale(market):

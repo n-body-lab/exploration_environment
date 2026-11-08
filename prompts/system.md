@@ -15,7 +15,7 @@ $messages_note
 - The goal is for everyone to solve their tasks, spending as few credits as possible in total.
 
 ## Memory
-- You have a private `memory` that persists across rounds. No other agent can read it. Use it to keep notes that will help you in later rounds.
+$memory_note
 $context_note
 
 ## Rules

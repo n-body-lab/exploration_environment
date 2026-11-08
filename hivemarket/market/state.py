@@ -320,7 +320,7 @@ class Broker:
                 f"{spent['offers']}, messages {spent['messages']}{fees_txt}). Ideal cost to solve: {self._ideal_text()}.")
         if last:
             await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
-                                outcome=outcome)
+                                outcome=outcome, objective=result["objective"])
             self.log.emit("game_over", rounds_played=self.round_no,
                           outcomes=[r["outcome"] for r in self.results],
                           credits_spent=[r["credits_spent"] for r in self.results],
@@ -331,7 +331,7 @@ class Broker:
             self.next_round_at = now() + self.pause_seconds
             await self._publish("*", body + f" Round {self.round_no + 1} starts in {int(self.pause_seconds)}s "
                                             "with the same problem.", event="round_end", round=self.round_no,
-                                outcome=outcome)
+                                outcome=outcome, objective=result["objective"])
         async with self._cond:
             self._cond.notify_all()
         return result
@@ -492,7 +492,18 @@ class Broker:
             "communication_cost": self.comm_cost if self.messages_enabled else None,
             "token_transfer": self.token_transfer,
             "participants": self.agents,
+            "last_round_result": self._last_result(agent_id),
         }
+
+    def _last_result(self, agent_id: str) -> dict[str, Any] | None:
+        """The agent's own result in the last round that ended: what it spent, by kind, and received.
+
+        Kept through the next round, so it can still be read after that round has started.
+        """
+        if not self.results:
+            return None
+        r = self.results[-1]
+        return {"round": r["round"], "outcome": r["outcome"], **r["per_agent"][agent_id]}
 
     def graph_view(self, agent_id: str) -> dict[str, Any]:
         if agent_id not in self.spec:

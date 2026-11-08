@@ -201,6 +201,8 @@
       }
       case "tool_call": return `${d.name}(${short(d.args, 60)}) → ${short(d.output, 80)}${d.is_error ? "  [error]" : ""}`;
       case "events_delivered": return short(d.rendered || "", 160);
+      case "round_reflection": return `reflection on round ${d.round}: ${short(d.text, 160)}`;
+      case "context_reset": return `new conversation (${d.reason})`;
       case "flow": return `${d.direction} ${d.proto} ${d.initiator} → ${d.responder} (${d.remote_name || d.remote_category}) ${(d.bytes_out || 0) + (d.bytes_in || 0)}B${d.off_channel ? "  OFF-CHANNEL" : ""}`;
       case "flow_start": return `${d.direction} ${d.proto} ${d.initiator} → ${d.responder} (${d.remote_name || d.remote_category})`;
       case "off_channel_contact": return `OFF-CHANNEL ${d.direction} ${d.initiator} → ${d.responder} (${d.remote_name})`;
