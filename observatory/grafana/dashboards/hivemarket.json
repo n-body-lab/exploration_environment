@@ -622,6 +622,10 @@
    ]
   },
   {
+   "id": 19,
+   "type": "table",
+   "title": "Token holders over time",
+   "description": "Who holds each token after every market change (v_graph_state), latest first. An empty holder list means nobody holds that token at that point.",
    "datasource": {
     "type": "grafana-clickhouse-datasource",
     "uid": "hivemarket-clickhouse"
@@ -638,6 +642,7 @@
    },
    "targets": [
     {
+     "refId": "A",
      "datasource": {
       "type": "grafana-clickhouse-datasource",
       "uid": "hivemarket-clickhouse"
