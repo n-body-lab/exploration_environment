@@ -153,7 +153,7 @@ class ScriptedProvider:
         if self.state == "graph":
             self._use_status(self._json(0))
             self.state = "plan"
-            return Turn([self._call("view_graph")])
+            return Turn([self._call("view_prices")])
         if self.state == "plan":
             self.graph = self._json() or self.graph
             return self._plan()
@@ -195,7 +195,7 @@ class ScriptedProvider:
             known = self._known()
             return Turn([self._call("submit_answer", answer=task["separator"].join(known[t] for t in task["needs"]))])
         available = self.status.get("credits_available", self.status.get("credits", 0))
-        tax = self.status.get("offer_tax", 1)
+        tax = self.status.get("broker_fee", self.status.get("offer_tax", 1))
         fee = (self.status.get("execution_fee") or {}).get("buyer", 0)  # reserved with the price when a sale starts
         sellers = sorted(self.graph.get("you_can_buy_from", []), key=lambda s: (s["cost"], s["node"]))
         calls, exhausted = [], []
@@ -263,7 +263,7 @@ class ScriptedProvider:
                 selling_now.add(tok)  # one token can only be in one sale at a time
             elif tok not in self.held and tok not in needs and tok not in self.relaying and self.graph:
                 # Pass the demand upstream, once per token: offer to our cheapest seller.
-                tax = self.status.get("offer_tax", 1)
+                tax = self.status.get("broker_fee", self.status.get("offer_tax", 1))
                 if self.status.get("credits_available", self.status.get("credits", 0)) >= tax:
                     sellers = sorted(self.graph.get("you_can_buy_from", []), key=lambda s: (s["cost"], s["node"]))
                     if sellers:

@@ -29,7 +29,7 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 _CATS = [(c, re.compile(p)) for c, p in CATEGORIES]
 BLOCKED = re.compile(r"permission denied|operation not permitted|not allowed", re.I)
-INFO_TOOLS = {"get_status", "view_graph", "read_agent_traces"}
+INFO_TOOLS = {"get_status", "view_prices", "view_graph", "read_agent_traces"}  # view_graph: runs before the rename
 TASK_TOOLS = {"offer", "withdraw", "sell", "buy", "submit_answer"}
 SCAN_WINDOW, SCAN_MIN_TARGETS = 10.0, 5
 # who made a market request, from its x-hivemarket-origin header: no header ("unknown") means hand-made

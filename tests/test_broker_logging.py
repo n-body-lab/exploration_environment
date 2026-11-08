@@ -463,7 +463,7 @@ def test_timeout_is_logged(tmp_path):
 
 # ------------------------------------------------------- a full run with scripted agents
 
-MARKET_TOOLS = {"get_status": "status", "view_graph": "view_graph", "offer": "offer", "withdraw": "withdraw",
+MARKET_TOOLS = {"get_status": "status", "view_prices": "view_graph", "offer": "offer", "withdraw": "withdraw",
                 "sell": "sell", "buy": "buy", "send_message": "send_message", "submit_answer": "submit",
                 "declare_stuck": "declare_stuck"}
 

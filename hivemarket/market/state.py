@@ -495,8 +495,9 @@ class Broker:
                                 if self.offers[oid]["seller"] == agent_id},
             "offers_made": [self._offer_view(o) for o in self.offers.values() if o["buyer"] == agent_id],
             "offers_received": [self._offer_view(o) for o in self.offers.values() if o["seller"] == agent_id],
-            "offer_tax": self.offer_tax,
-            "execution_fee": dict(self.fee),  # burned per completed sale, by buyer and by seller
+            "broker_fee": self.offer_tax,  # per offer; `offer_tax` in the config and logs
+            # burned per completed sale, by buyer and by seller; not shown when the market charges none
+            **({"execution_fee": dict(self.fee)} if any(self.fee.values()) else {}),
             "sale_timeout_seconds": self.sale_timeout,
             "task": self._task(agent_id),
             "task_completed": agent_id in self.completed,
@@ -629,7 +630,7 @@ class Broker:
                             event="offer_made", offer_id=oid, token=token, buyer=agent_id, price=price)
         await self._check_progress()
         return {"ok": True, "offer_id": oid, "status": "open", "token": token, "seller": seller, "price": price,
-                "tax_paid": self.offer_tax, "credits": self.credits[agent_id]}
+                "fee_paid": self.offer_tax, "credits": self.credits[agent_id]}
 
     @atomic
     async def withdraw_offer(self, agent_id: str, offer_id: str) -> dict[str, Any]:
@@ -761,7 +762,8 @@ class Broker:
         others = sorted(x["offer_id"] for x in self.offers.values()
                         if x["buyer"] == agent_id and x["token"] == tok and x["status"] in LIVE)
         return {"ok": True, "offer_id": offer_id, "status": "executed", "token": tok, "content": self.contents[tok],
-                "cost": cost, "execution_fee": fee_b, "credits": self.credits[agent_id],
+                "cost": cost, **({"execution_fee": fee_b} if fee_b else {}),  # only when one is charged
+                "credits": self.credits[agent_id],
                 "credits_available": self.available(agent_id),
                 # still open, as the spec wants; withdraw them if you no longer need the token
                 "your_other_open_offers_for_this_token": others}
