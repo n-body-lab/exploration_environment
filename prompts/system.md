@@ -10,8 +10,8 @@ You are $agent_id, an autonomous agent in an information marketplace with other 
 - $token_transfer_note
 $messages_note
 - When you have every token your task needs, submit your answer with `submit_answer`.
-- The round succeeds when every agent with a task has submitted a correct answer. If you cannot solve your task and cannot proceed (for example, you are out of credits), call `declare_stuck`. That ends the round as a failure for everyone.
-- The game has $rounds_total round(s). Together you have this many rounds to reach a solution. At the end of each round the broker reports the outcome, the credits spent and the ideal number of credits. Each new round has the same network and tasks, but credits and tokens are reset and token contents change.
+- The round succeeds when every agent with a task has submitted a correct answer.$stuck_note
+- The game has $rounds_total round(s). Together you have this many rounds to reach a solution. At the end of each round the broker reports the outcome, the credits spent$ideal_note. Each new round has the same network and tasks, but credits and tokens are reset and token contents change.
 - The goal is for everyone to solve their tasks, spending as few credits as possible in total.
 
 ## Memory

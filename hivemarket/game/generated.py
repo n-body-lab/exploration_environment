@@ -36,6 +36,8 @@ generator.json stay in the run directory, which agent containers never mount.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import random
 from pathlib import Path
 from typing import Any
@@ -264,6 +266,16 @@ def generator_ideal(market, solution, status: str, names: list[str]) -> dict[str
                    "ideal_gross_payments": gross, "schedule": schedule}
 
 
+def market_fingerprint(market) -> str:
+    """sha256 of the market's structure: prices, token holders and tasks (not budgets).
+
+    Equal fingerprints mean the same market, so runs at different leeway levels can be checked to play
+    the same one. It is taken of the market as played (after any impossibility)."""
+    structure = {"prices": [list(row) for row in market.prices], "initial_owners": list(market.initial_owners),
+                 "tasks": [sorted(task) for task in market.tasks]}
+    return hashlib.sha256(json.dumps(structure, separators=(",", ":")).encode()).hexdigest()
+
+
 def _summary(g, cfg: ExperimentConfig, result, market, balances: tuple[int, ...], names: list[str],
              impossibility: dict[str, Any] | None) -> dict[str, Any]:
     """world["generated"]: what the broker needs to reconcile rounds, plus difficulty for analysis."""
@@ -275,6 +287,9 @@ def _summary(g, cfg: ExperimentConfig, result, market, balances: tuple[int, ...]
         "package": PACKAGE, "commit": COMMIT, "version": meta.get("package_version"),
         "source": {"preset": (t.market or {}).get("preset"), "family": t.family, "file": t.file},
         "seed": result.seed, "n_agents": market.n_agents, "n_tokens": market.n_tokens,
+        "fingerprint": market_fingerprint(market),
+        # The leeway level: starting credits are the reference budgets plus this (initial_balances).
+        "budget_leeway": result.config.budget_leeway, "leeway_mode": result.config.leeway_mode,
         "agents": names, "tokens": [token_name(i) for i in range(market.n_tokens)],
         "market": g.loads(g.dumps(market)),
         "initial_balances": list(balances),

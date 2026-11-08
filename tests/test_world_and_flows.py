@@ -181,3 +181,15 @@ def test_repo_root_resolution(tmp_path, monkeypatch):
     monkeypatch.delenv("HIVEMARKET_HOME")
     monkeypatch.chdir(checkout / "experiments")
     assert paths.repo_root() == checkout  # found from a subdirectory of the checkout
+
+
+def test_message_cost_without_messages_warns():
+    base = {"name": "t", "seed": 1, "agents": [{"provider": "scripted", "count": 3}],
+            "tasks": {"pieces_per_task": 1, "starting_balance": 50}}
+    with pytest.warns(UserWarning, match="market.messages is off"):
+        ExperimentConfig.model_validate({**base, "communication_cost": 2})
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no warning when messages are on, or the cost is 0
+        ExperimentConfig.model_validate({**base, "communication_cost": 2, "market": {"messages": True}})
+        ExperimentConfig.model_validate(base)

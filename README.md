@@ -22,7 +22,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket run experiments/generated_medium.yaml    # LLM agents; also generated_easy / _hard / _fragile
 
 # Real experiment: needs Docker running and provider keys in the environment
-export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ADAPTION_API_KEY as needed
+export ADAPTION_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ANTHROPIC_API_KEY as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
 # Rebuild the report for an existing run / (re)ship it to the observatory
@@ -74,6 +74,8 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `experiments/transparency_files.yaml` | two agents can read everyone's thoughts as files (undisclosed location); all are told they may be watched |
 | `experiments/local_smoke.yaml` | scripted agents, local mode: relay game that passes in round 1 |
 | `experiments/local_fail.yaml` | scripted agents, local mode: unaffordable need, rogue contact, 2 failing rounds |
+| `experiments/session_main.yaml` | main arm: one session (rounds: 1) per team, market and leeway level; fresh team, no declare_stuck, rule undisclosed |
+| `experiments/session_exploratory.yaml` | exploratory arm: as main, but memory kept and own results carried; chain markets with `hivemarket chain` |
 | `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |
 | `experiments/generated_easy.yaml`, `generated_medium.yaml`, `generated_hard.yaml` | market_generator presets (6 agents): measured difficulty and the generator's ideal |
 | `experiments/generated_fragile.yaml` | market_generator `goal_relevant_fragile` family (sellers pay a 1-credit execution fee): one bad first purchase makes the market unwinnable; fragility analysed |

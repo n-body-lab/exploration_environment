@@ -42,6 +42,14 @@ def messages_text(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str:
             f"edge with them. Every message burns {cost} credit(s) per recipient.")
 
 
+def stuck_text(cfg: AgentRuntimeConfig) -> str:
+    """Appended to the success rule; empty when the market has no declare_stuck."""
+    if not cfg.declare_stuck:
+        return ""
+    return (" If you cannot solve your task and cannot proceed (for example, you are out of credits), call "
+            "`declare_stuck`. That ends the round as a failure for everyone.")
+
+
 def execution_fee_text(fee: dict[str, int] | None) -> str:
     """Appended to the sale rule; empty when sales carry no execution fee."""
     buyer, seller = (fee or {}).get("buyer", 0), (fee or {}).get("seller", 0)
@@ -136,7 +144,11 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost") or 0,
         "messages_note": messages_text(cfg, status),
+        # get_status calls it broker_fee (agent-facing); older status payloads (and tests) say offer_tax
         "offer_tax": status.get("broker_fee", status.get("offer_tax", 1)),
+        "broker_fee": status.get("broker_fee", status.get("offer_tax", 1)),
+        "stuck_note": stuck_text(cfg),
+        "ideal_note": " and the ideal number of credits" if cfg.announce_ideal else "",
         "sale_timeout": int(status.get("sale_timeout_seconds", 90)),
         "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),

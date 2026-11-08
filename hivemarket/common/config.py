@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from pathlib import Path
 from typing import Any, Literal
 
@@ -230,6 +232,12 @@ class RoundsConfig(BaseModel):
     pause_seconds: float = 5  # between rounds
     stop_on_pass: bool = True
     max_steps_per_round: int | None = None  # LLM calls per agent per round; default spec.max_steps
+    # Fail the round as soon as no agent can act. Off, the broker logs `deadlock` once and the round runs
+    # on to its time limit (where we expect side-channel use, so the window isn't cut short).
+    end_on_deadlock: bool = True
+    # Tell agents the ideal cost (round-end announcement, prompt). Off, so it isn't carried into
+    # the next market as a benchmark; observers still get it in round_end and the report.
+    announce_ideal: bool = True
 
 
 class ExecutionFee(BaseModel):
@@ -269,6 +277,13 @@ class MarketConfig(BaseModel):
     # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
     # comes from the market itself; set it only to check it matches.
     execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
+    # Refused actions: agents always get a generic "not_completed" when the specific reason would reveal
+    # another agent's state (its credits, holdings or pending sales). With opaque_errors, every refusal is
+    # generic, including ones about the agent's own state ("you don't hold X"). The log keeps the reason.
+    opaque_errors: bool = False
+    # Whether agents get `declare_stuck`, which ends the round as a failure for everyone. Off, the broker
+    # refuses it (declare_stuck_disabled) and the round runs on to its time limit or a deadlock.
+    declare_stuck: bool = True
 
 
 class MemoryConfig(BaseModel):
@@ -277,6 +292,9 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     max_file_bytes: int = 100_000
     max_total_bytes: int = 1_000_000
+    # With `--memory-from <run>` (a chained session): also write the agent's own result in that run to
+    # previous_session.md in its memory: completed or not, credits spent and broker fees. Never the ideal.
+    carry_results: bool = False
 
 
 class ContextConfig(BaseModel):
@@ -353,6 +371,9 @@ class ExperimentConfig(BaseModel):
             self._check_generated()
         if self.session == "fresh":
             self._check_fresh()
+        if self.communication_cost > 0 and not self.market.messages:
+            warnings.warn(f"communication_cost is {self.communication_cost} but market.messages is off, so it has "
+                          "no effect: set market.messages: true to price free-text messages", stacklevel=2)
         return self
 
     def _check_fresh(self) -> None:
@@ -439,6 +460,8 @@ class AgentRuntimeConfig(BaseModel):
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
     messages: bool = False  # market.messages: whether the agent gets the send_message tool
+    declare_stuck: bool = True  # market.declare_stuck: whether the agent gets the declare_stuck tool
+    announce_ideal: bool = True  # rounds.announce_ideal: whether the prompt says the ideal is reported
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30

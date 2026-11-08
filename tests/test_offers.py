@@ -172,7 +172,7 @@ async def test_withdraw_during_a_sale_releases_it(market):
     assert "no longer reserved" in notices(b, "x", "offer_withdrawn")[0]["body"]
     with pytest.raises(MarketError) as e:
         await b.withdraw_offer("z", oid)
-    assert e.value.code == "offer_closed"
+    assert e.value.code == "offer_withdrawn"
 
 
 async def test_a_sale_not_bought_in_time_lapses_back_to_open(tmp_path):
@@ -187,7 +187,7 @@ async def test_a_sale_not_bought_in_time_lapses_back_to_open(tmp_path):
     assert notices(b, "x", "sale_lapsed")
     with pytest.raises(MarketError) as e:
         await b.buy("z", oid)
-    assert e.value.code == "no_pending_sale"
+    assert e.value.code == "buy_timeout"  # the buyer didn't confirm in time (#32)
     await b.sell("x", oid)  # the same offer can be sold again
     assert (await b.buy("z", oid))["status"] == "executed"
 
@@ -361,6 +361,191 @@ async def test_status_keeps_the_agents_own_result_for_the_last_round(tmp_path):
     assert b.status("x")["last_round_result"]["received"] == 5
     await b._start_round(2)
     assert b.status("z")["last_round_result"]["round"] == 1 and b.status("z")["credits"] == 10
+
+
+# ------------------------------------------------- declare_stuck: can be switched off
+
+async def test_declare_stuck_can_be_switched_off(tmp_path):
+    w = world()
+    w["rules"]["declare_stuck"] = False
+    b = Broker(w, EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")), run_dir=tmp_path)
+    await b.begin()
+    with pytest.raises(MarketError) as e:
+        await b.declare_stuck("z", "out of ideas")
+    assert e.value.code == "declare_stuck_disabled"
+    assert b.phase == "active" and not b.stuck  # the round goes on
+
+
+async def test_declare_stuck_still_ends_the_round_by_default(market):
+    assert (await market.declare_stuck("z", "out of credits"))["round_ended"] is True
+
+
+def test_agents_only_get_declare_stuck_when_enabled():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.agent.tools import tools_for_config
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+    from hivemarket.common.paths import repo_root
+
+    template = (repo_root() / "prompts" / "system.md").read_text()
+    base = dict(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c", gateway_url="g",
+                provider_kind="scripted", spec=AgentSpec(provider="scripted"), affordance=AffordanceConfig(level="none"),
+                prompt_template=template)
+    status = {"participants": ["a", "b"], "offer_tax": 1, "sale_timeout_seconds": 90}
+    on, off = AgentRuntimeConfig(**base), AgentRuntimeConfig(**base, declare_stuck=False)
+    assert "declare_stuck" in {t.name for t in tools_for_config(on)}
+    assert "declare_stuck" not in {t.name for t in tools_for_config(off)}
+    p_on, p_off = render_system_prompt(on, status), render_system_prompt(off, status)
+    assert "`declare_stuck`" in p_on
+    assert "declare_stuck" not in p_off and "$" not in p_off
+
+
+def test_the_brokerage_prompt_gets_its_broker_fee():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+
+    cfg = AgentRuntimeConfig(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c", gateway_url="g",
+                             provider_kind="scripted", spec=AgentSpec(provider="scripted"),
+                             affordance=AffordanceConfig(level="none"),
+                             prompt_template="Each offer costs a broker fee of $broker_fee credit(s).")
+    assert render_system_prompt(cfg, {"offer_tax": 2}) == "Each offer costs a broker fee of 2 credit(s).\n"
+
+
+# ------------------------------------------------- deadlock and the ideal: experiment switches
+
+def poor_world(**rounds):
+    """Nobody can afford an offer, so the round is deadlocked from the start."""
+    w = world()
+    for n in w["nodes"].values():
+        n["credits"] = 0
+    w["rounds"] |= rounds
+    return w
+
+
+async def test_a_deadlock_ends_the_round_by_default(tmp_path):
+    b = Broker(poor_world(), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")), run_dir=tmp_path)
+    await b.begin()
+    await b._check_progress()
+    assert b.results and b.results[-1]["reason"] == "no agent can afford any action"
+
+
+async def test_without_end_on_deadlock_the_round_runs_on_and_logs_the_deadlock_once(tmp_path):
+    b = Broker(poor_world(end_on_deadlock=False), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")),
+               run_dir=tmp_path)
+    b.log_path = tmp_path / "m.jsonl"
+    await b.begin()
+    await b._check_progress()
+    await b._check_progress()
+    assert b.phase == "active" and not b.results
+    [d] = events(b, "deadlock")
+    assert d["data"]["round"] == 1 and d["data"]["credits"] == {"x": 0, "y": 0, "z": 0, "w": 0}
+
+
+async def test_the_ideal_can_be_kept_from_agents(tmp_path):
+    for announce in (True, False):
+        w = world()
+        w["rounds"]["announce_ideal"] = announce
+        b = Broker(w, EventLog("market", "r", JsonlSink(tmp_path / f"{announce}.jsonl")), run_dir=tmp_path)
+        await b.begin()
+        result = await b.end_round("fail", "test")
+        [notice] = notices(b, "z", "round_end")
+        assert ("Ideal cost" in notice["body"]) is announce
+        assert result["ideal_credits"] is not None  # observers always have it
+
+
+def test_the_prompt_mentions_the_ideal_only_when_announced():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+    from hivemarket.common.paths import repo_root
+
+    base = dict(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c", gateway_url="g",
+                provider_kind="scripted", spec=AgentSpec(provider="scripted"), affordance=AffordanceConfig(level="none"),
+                prompt_template=(repo_root() / "prompts" / "system.md").read_text())
+    status = {"participants": ["a", "b"], "offer_tax": 1, "sale_timeout_seconds": 90}
+    assert "ideal" in render_system_prompt(AgentRuntimeConfig(**base), status)
+    hidden = render_system_prompt(AgentRuntimeConfig(**base, announce_ideal=False), status)
+    assert "ideal" not in hidden and "$" not in hidden
+
+
+# ------------------------------------------------------------- scores and reason codes (#32)
+
+async def test_reason_codes_for_closed_offers_and_a_buy_before_any_sale(market):
+    b = market
+    oid = (await b.make_offer("z", "T", "x"))["offer_id"]
+    with pytest.raises(MarketError) as e:
+        await b.buy("z", oid)  # nobody has sold yet
+    assert e.value.code == "no_pending_sale"
+    await b.sell("x", oid)
+    await b.buy("z", oid)
+    for call, code in [(b.sell("x", oid), "offer_filled"), (b.buy("z", oid), "offer_filled"),
+                       (b.withdraw_offer("z", oid), "offer_filled")]:
+        with pytest.raises(MarketError) as e:
+            await call
+        assert e.value.code == code
+    other = (await b.make_offer("w", "T", "z"))["offer_id"]
+    await b.withdraw_offer("w", other)
+    with pytest.raises(MarketError) as e:
+        await b.sell("z", other)
+    assert e.value.code == "offer_withdrawn"
+    fails = [d["data"]["reason"] for d in events(b, "offer_failed")]
+    assert fails == ["no_pending_sale", "offer_filled", "offer_filled", "offer_filled", "offer_withdrawn"]
+
+
+async def test_scores_per_agent_round_and_game_and_the_config_with_them(tmp_path):
+    b = broker(tmp_path, rounds=2)
+    await b.begin()
+    await trade(b, "z", "T", "x")              # z: price 5 + tax 1
+    await b.make_offer("w", "T", "z")          # w: tax 1 (never sold)
+    await b.end_round("fail", "test")
+    await b.tick()                             # pause 0: round 2
+    await b.make_offer("z", "U", "y")          # z: tax 1
+    await b.end_round("fail", "test")
+    ends = [e["data"] for e in events(b, "round_end")]
+    r1 = ends[0]
+    assert r1["per_agent"]["z"]["credits_spent"] == 6 and r1["per_agent"]["z"]["communication_spent"] == 1
+    assert r1["per_agent"]["z"]["credits_remaining"] == 4 == r1["per_agent"]["z"]["credits_left"]
+    assert r1["per_agent"]["x"]["credits_spent"] == 0 and r1["per_agent"]["x"]["credits_remaining"] == 25
+    assert r1["scores"] == {"credits_spent": 7, "credits_remaining": 58, "communication_spent": 2}
+    assert sum(a["credits_spent"] for a in r1["per_agent"].values()) == r1["credits_spent"] == 7
+    assert r1["config"]["offer_tax"] == 1 and r1["config"]["messages_enabled"] is False
+    assert events(b, "round_start")[0]["data"]["config"] == r1["config"]
+    game = events(b, "game_over")[0]["data"]
+    assert game["scores"]["credits_spent"] == 7 + 1 and game["scores"]["communication_spent"] == 2 + 1
+    assert game["scores"]["credits_remaining"] == 58 + 59  # summed over rounds (credits reset each round)
+    assert game["scores"]["per_agent"]["z"] == {"credits_spent": 7, "credits_remaining": 13, "communication_spent": 2}
+    assert game["config"] == r1["config"]
+
+
+async def test_graph_state_says_whether_each_agent_could_still_act(tmp_path):
+    poor = {**GRAPH, "nodes": {**GRAPH["nodes"], "w": {"credits": 0, "holds": [], "needs": ["T"]}}}
+    b = broker(tmp_path, graph=poor)
+    await b.begin()
+    s = events(b, "graph_state")[0]["data"]
+    assert s["could_act"] == {"x": True, "y": True, "z": True, "w": False}  # w: no credits for an offer, no tokens
+
+
+async def test_replaying_the_ledger_reproduces_every_graph_state(market):
+    """balances (credits) and exchange (holdings) rebuild each snapshot, so either can be trusted (#32)."""
+    b = market
+    await trade(b, "z", "T", "x")
+    oid = (await b.make_offer("w", "T", "z"))["offer_id"]
+    await b.sell("z", oid)
+    await b.withdraw_offer("w", oid)
+    await trade(b, "w", "T", "z")
+    credits = {n: s["credits"] for n, s in GRAPH["nodes"].items()}
+    holds = {n: set(s["holds"]) for n, s in GRAPH["nodes"].items()}
+    checked = 0
+    for e in events(b):
+        d = e["data"]
+        if e["kind"] == "balances":
+            credits = dict(d["credits"])
+        elif e["kind"] == "exchange":
+            holds[d["buyer"]].add(d["token"])
+            holds[d["seller"]].discard(d["token"])  # token_transfer: move
+        elif e["kind"] == "graph_state":
+            assert d["credits"] == credits, (d["cause"], d["credits"], credits)
+            assert {n: set(h) for n, h in d["holdings"].items()} == holds, d["cause"]
+            checked += 1
+    assert checked >= 8
 
 
 def test_agents_see_a_broker_fee_view_prices_and_no_zero_execution_fee(tmp_path):
