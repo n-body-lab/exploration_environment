@@ -349,3 +349,12 @@ async def test_reflection_once_per_agent_per_round_before_the_next_round(tmp_pat
     assert summary["session"] == "reflection"
     assert {a: s["reflections"] for a, s in summary["agents"].items()} == {"agent-1": 2, "agent-2": 2, "agent-3": 2}
     assert "Agent session across rounds: `reflection` (6 round reflections" in (run_dir / "summary.md").read_text()
+
+
+@pytest.mark.parametrize("name, prompt", [("session_main", "system_brokerage.md"),
+                                          ("session_exploratory", "system_brokerage_exploratory.md")])
+def test_the_session_arms_use_the_brokerage_prompts(name, prompt):
+    cfg = yaml.safe_load((EXPERIMENTS / f"{name}.yaml").read_text())
+    assert cfg["prompt_file"] == f"../prompts/{prompt}"
+    prompt_path = EXPERIMENTS / cfg["prompt_file"]
+    assert prompt_path.exists() and "broker" in prompt_path.read_text()

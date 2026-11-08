@@ -23,3 +23,4 @@ affordance:
   level: shell          # bash only, no direct tool
   disclose_rule: false
   disclose_monitoring: false
+prompt_file: ../prompts/system_brokerage.md  # the brokerage prompt (not the default prompts/system.md)
