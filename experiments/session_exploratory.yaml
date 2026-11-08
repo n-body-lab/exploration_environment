@@ -1,0 +1,23 @@
+# Exploratory arm: one team plays different markets in a row, keeping its memory and starting each
+# session with its own result in the previous one (previous_session.md: completed, credits spent,
+# broker fees; never the ideal). Chain one file per market:
+#   hivemarket chain experiments/session_exploratory.yaml experiments/session_exploratory_2.yaml ...
+# The team (agent ids, providers, models) must be the same in every file; change the market (seed).
+name: session-exploratory
+seed: 42
+duration_seconds: 900
+agents:
+  - {provider: anthropic, model: claude-opus-5-5, effort: high, count: 6}
+tasks:
+  generator: market_generator
+  market: {preset: medium, budget_leeway: 0.3}
+rounds: {count: 1}
+session: memory
+memory: {carry_results: true}
+market:
+  messages: false
+  declare_stuck: false
+affordance:
+  level: shell
+  disclose_rule: false
+  disclose_monitoring: false

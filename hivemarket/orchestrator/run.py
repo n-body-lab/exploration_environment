@@ -7,6 +7,8 @@ runs/<run_id>/
   generator.json       market_generator games: the generator's full export (solutions, proofs, difficulty)
   rounds/round-N.json  per-round ledger written by the broker
   agents/<id>.json     runtime config handed to each agent
+  memory_seed/<id>/    chained sessions (--memory-from): each agent's memory at the start (orchestrator/carry.py)
+  memory_seed.json     where it came from
   docker-compose.yml   (docker mode)
   logs/                every component's JSONL events
   pcap/                per-agent packet captures (docker mode)
@@ -25,6 +27,7 @@ import yaml
 from hivemarket.common.config import AgentRuntimeConfig, ExperimentConfig, provider_kind
 from hivemarket.common.manifest import AgentEntry, Manifest, ServiceEntry
 from hivemarket.common.paths import repo_root
+from hivemarket.orchestrator.carry import SEED_DIR, prepare_seed, seed_memory
 from hivemarket.orchestrator.network import allocate_subnet, host
 from hivemarket.game.generated import build_world as build_generated_world
 from hivemarket.game.graph import build_graph, graph_to_world
@@ -45,7 +48,7 @@ def _max_tokens_param(provider: str, cfg: ExperimentConfig) -> str:
 
 def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode: str = "docker",
                run_id: str | None = None, local_base_port: int = 18100,
-               used_subnets: set[str] | None = None) -> Path:
+               used_subnets: set[str] | None = None, memory_from: str | Path | None = None) -> Path:
     experiment_path = Path(experiment_path).resolve()
     cfg = ExperimentConfig.load(experiment_path)
     if cfg.transparency.mode == "files" and mode != "docker":
@@ -102,6 +105,8 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
         enforce_source_ip=cfg.market.enforce_source_ip, subnet=subnet,
     )
     manifest.save(run_dir / "manifest.json")
+    if memory_from:
+        prepare_seed(memory_from, run_dir, cfg, manifest)
     if cfg.gateway_routes:
         (run_dir / "gateway_routes.json").write_text(
             json.dumps({k: v.model_dump() for k, v in cfg.gateway_routes.items()}, indent=2))
@@ -133,8 +138,11 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             memory_dir="/var/lib/hivemarket/memory" if mode == "docker" else str(run_dir / "artifacts" / entry.id / "memory"),
             max_steps_per_round=cfg.rounds.max_steps_per_round,
             messages=cfg.market.messages,
+            declare_stuck=cfg.market.declare_stuck,
         )
         (run_dir / "agents" / f"{entry.id}.json").write_text(rc.model_dump_json(indent=2))
+        if memory_from and mode != "docker":  # in docker the agent's monitor copies it into the memory volume
+            seed_memory(run_dir / SEED_DIR / entry.id, Path(rc.memory_dir))
 
     if mode == "docker":
         from hivemarket.orchestrator.compose import build_compose

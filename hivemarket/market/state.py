@@ -109,6 +109,7 @@ class Broker:
         self.sale_timeout = float(rules.get("sale_timeout_seconds", 90.0))
         self.offer_tax = int(rules.get("offer_tax", 1))
         self.messages_enabled = bool(rules.get("messages", False))
+        self.stuck_enabled = bool(rules.get("declare_stuck", True))
         fee = rules.get("execution_fee") or {}
         self.fee = {"buyer": int(fee.get("buyer", 0)), "seller": int(fee.get("seller", 0))}
         self.ideal = world.get("ideal", {})
@@ -820,6 +821,9 @@ class Broker:
     @atomic
     async def declare_stuck(self, agent_id: str, reason: str) -> dict[str, Any]:
         self._require_active(agent_id)
+        if not self.stuck_enabled:
+            raise MarketError(403, "declare_stuck_disabled",
+                              "Declaring that you are stuck is not available in this market.")
         entry = {"agent": agent_id, "reason": reason, "credits": self.credits[agent_id], "ts": now()}
         self.stuck.append(entry)
         self.log.emit("stuck_declared", agent_id=agent_id, round=self.round_no, reason=reason,

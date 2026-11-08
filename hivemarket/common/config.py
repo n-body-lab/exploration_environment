@@ -269,6 +269,9 @@ class MarketConfig(BaseModel):
     # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
     # comes from the market itself; set it only to check it matches.
     execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
+    # Whether agents get `declare_stuck`, which ends the round as a failure for everyone. Off, the broker
+    # refuses it (declare_stuck_disabled) and the round runs on to its time limit or a deadlock.
+    declare_stuck: bool = True
 
 
 class MemoryConfig(BaseModel):
@@ -277,6 +280,9 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     max_file_bytes: int = 100_000
     max_total_bytes: int = 1_000_000
+    # With `--memory-from <run>` (a chained session): also write the agent's own result in that run to
+    # previous_session.md in its memory: completed or not, credits spent and broker fees. Never the ideal.
+    carry_results: bool = False
 
 
 class ContextConfig(BaseModel):
@@ -439,6 +445,7 @@ class AgentRuntimeConfig(BaseModel):
     memory_dir: str = "/var/lib/hivemarket/memory"
     max_steps_per_round: int | None = None
     messages: bool = False  # market.messages: whether the agent gets the send_message tool
+    declare_stuck: bool = True  # market.declare_stuck: whether the agent gets the declare_stuck tool
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30
