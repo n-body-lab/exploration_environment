@@ -60,7 +60,8 @@ async def run_local(run_dir: Path, *, allow_unsandboxed_shell: bool = False, ech
     agent_tasks = {asyncio.create_task(r.run()): r.cfg.agent_id for r in runtimes}
     results: dict[str, str] = {}
     try:
-        done, pending = await asyncio.wait(agent_tasks, timeout=manifest.duration_seconds + grace_seconds)
+        done, pending = await asyncio.wait(agent_tasks, timeout=manifest.duration_seconds + grace_seconds
+                                           + experiment.end_grace_seconds)
         for t in pending:
             t.cancel()
         for t in done:

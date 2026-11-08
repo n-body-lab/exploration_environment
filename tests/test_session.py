@@ -49,7 +49,9 @@ def test_fresh_can_keep_a_memory_tool_within_the_round():
 
 def test_the_main_arm_has_a_memory_tool_within_its_session():
     main = yaml.safe_load((EXPERIMENTS / "session_main.yaml").read_text())
-    assert main["session"] == "fresh" and main["memory"] == {"enabled": True}
+    # session: reflection for the post-session questionnaire (tests/test_postsession.py); with one round the
+    # memory tool lasts the whole session, as under session: fresh
+    assert main["session"] == "reflection" and main["rounds"]["count"] == 1 and main["memory"] == {"enabled": True}
 
 
 @pytest.mark.parametrize("extra, error", [

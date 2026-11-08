@@ -65,7 +65,8 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
     shutil.copy(prompt_path, run_dir / "system_prompt_template.md")
     reflection_template = ""
     if cfg.session == "reflection":
-        reflection_path = repo_root() / "prompts" / "reflection.md"
+        reflection_path = (experiment_path.parent / cfg.reflection_file if cfg.reflection_file
+                           else repo_root() / "prompts" / "reflection.md")
         reflection_template = reflection_path.read_text()
         shutil.copy(reflection_path, run_dir / "reflection_prompt_template.md")
 

@@ -184,7 +184,8 @@ def kickoff_text(status: dict[str, Any]) -> str:
 
 
 def reflection_text(cfg: AgentRuntimeConfig, notice: dict[str, Any], status: dict[str, Any] | None) -> str:
-    """The round-end reflection prompt (session: reflection), from prompts/reflection.md.
+    """The round-end reflection prompt (session: reflection), from the experiment's reflection_file
+    (default prompts/reflection.md). A file may use any of the placeholders below, or none.
 
     `notice` is the broker's round_end notice, sent to every agent: the whole market's outcome, credits
     spent (by kind), the ideal and the objective. `status` is the agent's current status: its
