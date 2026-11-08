@@ -137,6 +137,16 @@ def restart_text(reason: str, status: dict[str, Any], summaries: list[str], memo
     return "\n\n".join(parts)
 
 
+def session_minutes(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str:
+    """The session's (round's) length in minutes for $session_minutes: from the experiment's time limit,
+    or, for configs written before it was passed in, the time left when the prompt is first rendered."""
+    seconds = cfg.round_seconds or status.get("seconds_left_in_round")
+    if not seconds:
+        return "?"
+    minutes = round(seconds / 60, 1)
+    return str(int(minutes)) if minutes == int(minutes) else str(minutes)
+
+
 def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str:
     values = {
         "agent_id": cfg.agent_id,
@@ -150,6 +160,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "stuck_note": stuck_text(cfg),
         "ideal_note": " and the ideal number of credits" if cfg.announce_ideal else "",
         "sale_timeout": int(status.get("sale_timeout_seconds", 90)),
+        "session_minutes": session_minutes(cfg, status),
         "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
         "rules": rules_text(cfg),

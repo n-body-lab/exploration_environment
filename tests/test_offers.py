@@ -561,3 +561,35 @@ def test_agents_see_a_broker_fee_view_prices_and_no_zero_execution_fee(tmp_path)
     assert "tax" not in text and "broker fee" in text
     b.fee = {"buyer": 1, "seller": 0}  # a market that does charge one shows it
     assert b.status("z")["execution_fee"] == {"buyer": 1, "seller": 0}
+
+
+def test_the_prompt_gets_the_session_length_in_minutes():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+
+    def render(**kw):
+        cfg = AgentRuntimeConfig(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c",
+                                 gateway_url="g", provider_kind="scripted", spec=AgentSpec(provider="scripted"),
+                                 affordance=AffordanceConfig(level="none"),
+                                 prompt_template="The session lasts $session_minutes minutes.", **kw)
+        return render_system_prompt(cfg, {"seconds_left_in_round": 287.4})
+
+    assert render(round_seconds=900) == "The session lasts 15 minutes.\n"
+    assert render(round_seconds=450) == "The session lasts 7.5 minutes.\n"
+    assert render() == "The session lasts 4.8 minutes.\n"  # older agent configs: the time left at the start
+
+
+def test_create_run_passes_the_time_limit_to_every_agent(tmp_path):
+    import json
+
+    from hivemarket.orchestrator.run import create_run
+
+    exp = tmp_path / "e.yaml"
+    exp.write_text(
+        "name: t\nseed: 1\nagents: [{provider: scripted, model: scripted, count: 2}]\n"
+        "graph:\n  nodes:\n    agent-1: {credits: 5, holds: [A], needs: []}\n    agent-2: {credits: 5, needs: [A]}\n"
+        "  edges: [{from: agent-1, to: agent-2, cost: 1}]\n"
+        "rounds: {count: 1, round_seconds: 600}\n")
+    run_dir = create_run(exp, tmp_path / "runs", mode="local", local_base_port=19870)
+    for f in (run_dir / "agents").glob("*.json"):
+        assert json.loads(f.read_text())["round_seconds"] == 600
