@@ -469,6 +469,7 @@ class AgentRuntimeConfig(BaseModel):
     declare_stuck: bool = True  # market.declare_stuck: whether the agent gets the declare_stuck tool
     announce_ideal: bool = True  # rounds.announce_ideal: whether the prompt says the ideal is reported
     round_seconds: float | None = None  # the round's (session's) time limit: the prompt's $session_minutes
+    rounds: int = 2  # rounds.count; 1 means the tools call it a "session" (default: older configs keep "round")
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30

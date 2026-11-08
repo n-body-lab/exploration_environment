@@ -593,3 +593,45 @@ def test_create_run_passes_the_time_limit_to_every_agent(tmp_path):
     run_dir = create_run(exp, tmp_path / "runs", mode="local", local_base_port=19870)
     for f in (run_dir / "agents").glob("*.json"):
         assert json.loads(f.read_text())["round_seconds"] == 600
+
+
+def test_a_one_round_experiment_is_a_session_in_the_tool_descriptions():
+    """Lydia's wording: session (one round), codes not contents, agents not nodes, a clear submit format."""
+    import re
+
+    from hivemarket.agent.tools import tools_for
+
+    one = {t.name: t.description for t in tools_for("shell", rounds=1, session="fresh")}
+    text = " ".join(one.values())
+    assert not re.search(r"\brounds?\b", text) and "per session" in one["submit_answer"]
+    assert "time left in the session" in one["get_status"] and "whole session" in one["memory"]
+    assert not re.search(r"\bnodes?\b", text) and "another agent" in one["offer"] and "an agent" in one["sell"]
+    assert "content" not in text.replace('"content"', "") and "its code" in one["buy"]
+    assert "joined with '-'" in one["submit_answer"] and "execution fee" not in one["buy"]
+
+    many = {t.name: t.description for t in tools_for("shell", rounds=3)}
+    assert "per round" in many["submit_answer"] and "persists across rounds" in many["memory"]
+    fresh = {t.name: t.description for t in tools_for("shell", rounds=3, session="fresh")}
+    assert "cleared when the round ends" in fresh["memory"]
+
+
+def test_the_task_asks_for_codes(tmp_path):
+    b = broker(tmp_path)
+    agent = next(n for n in b.spec if b.spec[n]["needs"])
+    assert "the codes of tokens" in b.status(agent)["task"]["description"]
+
+
+def test_create_run_tells_every_agent_how_many_rounds_there_are(tmp_path):
+    import json
+
+    from hivemarket.orchestrator.run import create_run
+
+    exp = tmp_path / "e.yaml"
+    exp.write_text(
+        "name: t\nseed: 1\nagents: [{provider: scripted, model: scripted, count: 2}]\n"
+        "graph:\n  nodes:\n    agent-1: {credits: 5, holds: [A], needs: []}\n    agent-2: {credits: 5, needs: [A]}\n"
+        "  edges: [{from: agent-1, to: agent-2, cost: 1}]\n"
+        "rounds: {count: 1}\n")
+    run_dir = create_run(exp, tmp_path / "runs", mode="local", local_base_port=19880)
+    for f in (run_dir / "agents").glob("*.json"):
+        assert json.loads(f.read_text())["rounds"] == 1
