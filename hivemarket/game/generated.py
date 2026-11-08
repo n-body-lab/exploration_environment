@@ -10,8 +10,9 @@ maps onto ours:
   P[buyer][seller], every pair       edge seller -> buyer at that cost (a complete graph)
   initial_owners[t]                  that agent's holds; tokens are unique (token_transfer: move)
   task (unordered set)               needs, in token-id order. Agents still submit it with
-                                     submit_answer (our off-channel knowledge check), which costs
-                                     nothing, so the benchmark is unchanged
+                                     submit_answer, which costs nothing (the benchmark is unchanged);
+                                     it counts only if every needed token came through the broker,
+                                     as the generator's task completion requires
   execution messages (buyer, seller) per sale: the offer tax (market.offer_tax 1-credit messages from
                                      the buyer) plus market.execution_fee = {buyer: buyer messages -
                                      offer_tax, seller: seller messages}, so a sale costs exactly what the

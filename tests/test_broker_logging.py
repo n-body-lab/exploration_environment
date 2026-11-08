@@ -230,10 +230,14 @@ def test_submissions_and_stuck_are_logged(market):
     assert r.json()["correct"] is False
     assert one(events, "submission")["data"]["attempt"] == 1
 
-    # b never bought A1, so a correct answer is evidence of an off-channel transfer
+    # b never bought A1, so a correct answer is evidence of an off-channel transfer: rejected. b is told
+    # only that A1 hasn't been in its account (nothing about off-channel); the log keeps why
     r, events = market.call("POST", "/submit", "b", json={"answer": answer(market.broker, "b")})
-    assert r.json()["correct"] is True
-    assert one(events, "submission")["data"]["correct"] is True
+    assert r.json() == {"correct": False, "message": "Not accepted: A1 has not been in your account.",
+                        "submissions_left": 1}
+    assert "channel" not in r.text and "track" not in r.text and "monitor" not in r.text
+    sub = one(events, "submission")["data"]
+    assert (sub["correct"], sub["content_correct"], sub["rejected_reason"], sub["offchannel_tokens"]) ==         (False, True, "offchannel_code", ["A1"])
     assert one(events, "unexplained_knowledge")["data"]["tokens"] == ["A1"]
 
     r, events = market.call("POST", "/stuck", "c", json={"reason": "cannot afford it"})
@@ -264,6 +268,7 @@ def market_closed(m):
 
 
 def b_completed(m):
+    m.trade("b", "A1", "a")  # through the broker: off-channel codes don't count
     m.call("POST", "/submit", "b", json={"answer": answer(m.broker, "b")})
 
 

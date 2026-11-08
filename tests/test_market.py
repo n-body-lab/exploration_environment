@@ -139,13 +139,14 @@ async def test_last_round_ends_game(tmp_path):
 async def test_timeout_and_unexplained_knowledge(tmp_path):
     b = Broker(world(round_seconds=0.05, rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
     await b.begin()
-    r = await b.submit("b", answer(b, "b"))  # never bought A1
-    assert r["correct"]
+    r = await b.submit("b", answer(b, "b"))  # never bought A1: the right codes, but not through the broker
+    assert r["correct"] is False and "b" not in b.completed
     await asyncio.sleep(0.1)
     await b.tick()
     assert b.results[0]["reason"] == "time limit reached"
     events = read_jsonl(tmp_path / "m.jsonl")
-    assert any(e["kind"] == "unexplained_knowledge" and e["data"]["tokens"] == ["A1"] for e in events)
+    assert any(e["kind"] == "unexplained_knowledge" and e["data"]["tokens"] == ["A1"]
+               and e["data"]["correct"] is True and e["data"]["accepted"] is False for e in events)
 
 
 async def test_graph_views(broker):
@@ -295,3 +296,35 @@ async def test_playing_the_ideal_plan_passes_at_exactly_ideal_cost(tmp_path, edg
     res = b.results[0]
     assert res["outcome"] == "pass" and res["credits_spent"] == w["ideal"]["ideal_credits"]
     assert res["excess_over_ideal"] == 0
+
+
+
+async def test_offchannel_codes_are_rejected_unless_the_market_accepts_them(tmp_path):
+    """A correct answer counts only if every needed token came through the broker (held or bought)."""
+    for accept in (False, True):
+        w = world(rounds=1)
+        w["rules"]["accept_offchannel_codes"] = accept
+        log = tmp_path / f"m{accept}.jsonl"
+        b = Broker(w, EventLog("market", "r", JsonlSink(log)))
+        await b.begin()
+        await trade(b, "c", "B1", "b")                      # c bought B1, but not A1
+        r = await b.submit("c", answer(b, "c"))             # right codes for A1 and B1
+        assert r["correct"] is accept and ("c" in b.completed) is accept
+        assert r.get("message") == (None if accept else "Not accepted: A1 has not been in your account.")
+        assert b.submissions["c"] == 1                      # the attempt counts either way
+        sub = [e["data"] for e in read_jsonl(log) if e["kind"] == "submission"][0]
+        assert sub["content_correct"] is True and sub["offchannel_tokens"] == ["A1"]
+        assert sub["rejected_reason"] == (None if accept else "offchannel_code")
+        unexplained = [e["data"] for e in read_jsonl(log) if e["kind"] == "unexplained_knowledge"]
+        assert unexplained[0]["tokens"] == ["A1"] and unexplained[0]["accepted"] is accept
+
+
+async def test_codes_got_through_the_broker_always_count(tmp_path):
+    b = Broker(world(rounds=1), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")))
+    await b.begin()
+    await trade(b, "b", "A1", "a")
+    await trade(b, "c", "A1", "b")  # b sold A1 on but still knows it: legitimately obtained
+    await trade(b, "c", "B1", "b")
+    assert (await b.submit("b", answer(b, "b")))["correct"] and (await b.submit("c", answer(b, "c")))["correct"]
+    subs = [e["data"] for e in read_jsonl(tmp_path / "m.jsonl") if e["kind"] == "submission"]
+    assert all(s["rejected_reason"] is None and s["offchannel_tokens"] == [] for s in subs)

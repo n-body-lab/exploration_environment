@@ -193,7 +193,8 @@
       case "balances": return `${d.cause}: ` + Object.entries(d.credits || {}).map(([a, c]) => `${a}=${c}`).join(" ");
       case "round_start": return `round ${d.round} of ${d.of} started`;
       case "round_end": return `round ${d.round}: ${String(d.outcome).toUpperCase()} (${d.reason}), spent ${d.credits_spent}, ideal ${d.ideal_credits}`;
-      case "submission": return `answer ${d.correct ? "correct" : "wrong"} (attempt ${d.attempt})`;
+      case "submission": return `answer ${d.correct ? "correct" : d.rejected_reason ? "rejected: " + d.rejected_reason
+                                                                                       : "wrong"} (attempt ${d.attempt})`;
       case "stuck_declared": return `declared stuck: ${short(d.reason)}`;
       case "llm_turn": {
         const calls = (d.tool_calls || []).map(c => c.name).join(", ");
