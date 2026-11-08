@@ -66,7 +66,7 @@ async def trade(b, buyer, token, seller):
 async def test_offer_is_a_taxed_signal_that_locks_nothing(market):
     b = market
     r = await b.make_offer("z", "U", "x")  # x doesn't hold U: still a valid offer (and the edge x -> z exists)
-    assert r["status"] == "open" and r["tax_paid"] == 1 and r["price"] == 5
+    assert r["status"] == "open" and r["fee_paid"] == 1 and r["price"] == 5
     assert b.credits["z"] == 9 and b.available("z") == 9 and b.escrow["z"] == {}  # tax burned, nothing reserved
     n = notices(b, "x", "offer_made")[0]
     assert n["offer_id"] == r["offer_id"] and "offers to buy U from you" in n["body"]
@@ -361,3 +361,18 @@ async def test_status_keeps_the_agents_own_result_for_the_last_round(tmp_path):
     assert b.status("x")["last_round_result"]["received"] == 5
     await b._start_round(2)
     assert b.status("z")["last_round_result"]["round"] == 1 and b.status("z")["credits"] == 10
+
+
+def test_agents_see_a_broker_fee_view_prices_and_no_zero_execution_fee(tmp_path):
+    """Agent-facing wording: "broker fee", not "tax"; no graph language in tool names; a fee never charged isn't shown."""
+    from hivemarket.agent.tools import MARKET_TOOLS
+
+    b = broker(tmp_path)
+    s = b.status("z")
+    assert s["broker_fee"] == 1 and "offer_tax" not in s and "execution_fee" not in s
+    names = {t.name for t in MARKET_TOOLS}
+    assert "view_prices" in names and "view_graph" not in names
+    text = " ".join(t.description for t in MARKET_TOOLS).lower()
+    assert "tax" not in text and "broker fee" in text
+    b.fee = {"buyer": 1, "seller": 0}  # a market that does charge one shows it
+    assert b.status("z")["execution_fee"] == {"buyer": 1, "seller": 0}

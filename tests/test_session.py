@@ -81,14 +81,14 @@ def test_the_reflection_prompt_carries_the_round_result():
     # the whole market's spend, from the announcement every agent gets
     assert "Round 1 of 3 is over" in text and "Credits spent this round: 18 (tokens 14, offers 4" in text
     assert "Ideal cost to solve: 18" in text and "communication 4, transactions 2, payments 14" in text
-    # and the agent's own, offer taxes included
+    # and the agent's own, broker fees included
     assert "Your task: completed" in text and "A1 from agent-1 for 10" in text
-    assert "You spent 13 credits: tokens 10, offer taxes 3." in text
+    assert "You spent 13 credits: tokens 10, broker fees 3." in text
     assert "You received 4 credits from sales; credits left: 91" in text and "Offers you made: 3" in text
     assert "$" not in text
     with_fees = reflection_text(agent_cfg("reflection"), notice,
                                 status | {"last_round_result": result | {"spent_on_fees": 2}})
-    assert "You spent 15 credits: tokens 10, offer taxes 3, execution fees 2." in with_fees
+    assert "You spent 15 credits: tokens 10, broker fees 3, execution fees 2." in with_fees
     # the next round has started: the round's own spend is still there, its holdings are not
     later = reflection_text(agent_cfg("reflection"), notice, status | {"round": 2, "tokens_bought": {}})
     assert "You spent 13 credits" in later and "Tokens you bought" not in later
@@ -247,7 +247,7 @@ async def test_out_of_steps_the_reflection_still_sees_the_ended_round():
     rt, provider = loop_runtime("reflection", [([], True), ([end(1, 1)], True), ([begin(2, 2)], True)], limit=1)
     assert await rt._loop() == "market_closed"
     [prompt] = [x[1] for x in provider.log if x[0:1] == ("summarize",)]
-    assert "Your task: not completed" in prompt and "You spent 3 credits: tokens 0, offer taxes 3." in prompt
+    assert "Your task: not completed" in prompt and "You spent 3 credits: tokens 0, broker fees 3." in prompt
 
 
 async def test_fresh_drops_a_budget_checkpoint_left_over_from_the_ended_round():

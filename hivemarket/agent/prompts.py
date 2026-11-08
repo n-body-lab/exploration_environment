@@ -136,7 +136,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "rounds_total": status.get("rounds_total", 1),
         "communication_cost": status.get("communication_cost") or 0,
         "messages_note": messages_text(cfg, status),
-        "offer_tax": status.get("offer_tax", 1),
+        "offer_tax": status.get("broker_fee", status.get("offer_tax", 1)),
         "sale_timeout": int(status.get("sale_timeout_seconds", 90)),
         "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
@@ -183,7 +183,7 @@ def _own_result(status: dict[str, Any] | None, round_no: Any) -> str:
     if not result or result.get("round") != round_no:
         return "- Not available."
     task = ("no task" if not status.get("task") else "completed" if result.get("completed") else "not completed")
-    kinds = [("tokens", result.get("spent_on_tokens", 0)), ("offer taxes", result.get("spent_on_offers", 0)),
+    kinds = [("tokens", result.get("spent_on_tokens", 0)), ("broker fees", result.get("spent_on_offers", 0)),
              ("messages", result.get("spent_on_messages", 0)), ("execution fees", result.get("spent_on_fees", 0))]
     total = sum(v for _, v in kinds)
     breakdown = ", ".join(f"{k} {v}" for i, (k, v) in enumerate(kinds) if i < 2 or v)

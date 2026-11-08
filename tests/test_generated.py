@@ -350,7 +350,7 @@ async def test_generator_data_never_reaches_agents(tmp_path, visibility):
         seen = json.dumps([status, b.graph_view(agent)]) + prompt + kickoff_text(status) + runtime.model_dump_json()
         assert not [s for s in GENERATOR_ONLY if s in seen], agent
         # the offer tax plays the generator's buyer message, so there is no extra fee and no fee note
-        assert status["execution_fee"] == {"buyer": 0, "seller": 0} and status["offer_tax"] == 1
+        assert "execution_fee" not in status and status["broker_fee"] == 1  # no fee charged: not shown
         assert "execution fee" not in prompt
 
 

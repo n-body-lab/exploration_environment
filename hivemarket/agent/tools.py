@@ -37,20 +37,21 @@ MARKET_TOOLS = [
     ToolSpec("get_status",
              "Get the current round, your credits (total, available, and reserved for sales in progress), the "
              "tokens you hold and every token content you know (including tokens you have sold), the offers you "
-             "have made and received, your task, time left in the round, the costs (offer tax, execution fee) "
+             "have made and received, your task, time left in the round, the costs (the broker fee per offer, and "
+             "any execution fee) "
              "and the list of participants.",
              _obj({}, [])),
-    ToolSpec("view_graph",
-             "See who you can buy tokens from and at what price, and who can buy from you at what price. It does "
-             "not show what other nodes hold.", _obj({}, [])),
+    ToolSpec("view_prices",
+             "See your prices: who you can buy tokens from and at what price, and who can buy from you at what "
+             "price. It does not show what other agents hold.", _obj({}, [])),
     ToolSpec("offer",
              "Make an offer to buy a token from another node, at that node's fixed price to you. This is how you "
-             "signal demand: it costs the offer tax (burned, never refunded), locks no other credits, and the "
+             "signal demand: it costs the broker fee (kept by the broker, never refunded), locks no other credits, and the "
              "node does not need to hold the token yet. The offer stays open until a sale on it completes or you "
              "withdraw it. The node is told who you are and which token you want. Returns an offer_id.",
              _obj({"token": {"type": "string"}, "seller": {"type": "string"}}, ["token", "seller"])),
     ToolSpec("withdraw",
-             "Withdraw one of your offers, e.g. once you no longer need the token. Free, but the offer tax is not "
+             "Withdraw one of your offers, e.g. once you no longer need the token. Free, but the broker fee is not "
              "refunded. Also cancels a sale in progress on that offer.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("sell",
@@ -217,7 +218,7 @@ class ToolExecutor:
         try:
             if name == "get_status":
                 return self._fmt(await self.market.status())
-            if name == "view_graph":
+            if name == "view_prices":
                 return self._fmt(await self.market.graph())
             if name == "offer":
                 return self._fmt(await self.market.offer(str(args["token"]), str(args["seller"])))
