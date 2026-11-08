@@ -95,8 +95,8 @@ rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 - **Atomicity and causal order.** Every state-changing request (offers, sales, messages, submissions, stuck, round transitions, sale timeouts) runs under one broker lock. The lock is held only while that request is applied, never while waiting for an agent, so the market never stalls on a slow agent (a broker-wide transaction lock is discussed in #20). Every event in the market log carries a global, strictly increasing `seq`, so events have a total order even when timestamps tie, and each request's events form one contiguous block.
 - **Communication.** Offers are the communication channel, as in the game spec (§4.3, §5.2): an offer tells its recipient who wants which token, and nothing else. Free-text broker messages (`send_message`) are **off by default**. `market.messages: true` turns them on as an experimental condition: agents then get the `send_message` tool and a line in the prompt, and every message burns `communication_cost` credits from the sender, per recipient (a broadcast to N costs N×). With messages off, the broker refuses `/messages` (`messages_disabled`, logged), and message costs don't count toward "can anyone still act". Credits reserved for a sale in progress can't be spent on messages.
 - **Solving.** A node with `needs` submits the contents of its needed tokens, in order, joined with `-`. The round **passes** when every such node has submitted correctly.
-- **Failing.** Any agent can `declare_stuck` (can't solve, can't proceed), which ends the round as a **fail** for everyone. The round also fails on its time limit, or when no agent can afford an offer or a message and no open offer could still be sold (a seller holding the token and a buyer able to pay). A lull in trading is not a deadlock while a sale is still possible.
-- **Round end.** The broker tells every agent the outcome, the reason, the credits spent (on tokens, offers and messages, and on execution fees when the market charges them) and the ideal credits. For a generated game the ideal says whether it is proven optimal or only the best plan found. `round_end` also carries the spec's collective objective, `objective` = (communication spent including execution fees, transactions, payments), compared in that order. If rounds remain, the next round starts after `pause_seconds` with the same graph, reset credits and holdings, and new token contents. With `stop_on_pass`, the game ends at the first pass. Agents are told up front how many rounds they have to reach a solution collectively.
+- **Failing.** Any agent can `declare_stuck` (can't solve, can't proceed), which ends the round as a **fail** for everyone. `market.declare_stuck: false` takes it away: agents don't get the tool or its line in the prompt, and the broker refuses `/stuck` (`declare_stuck_disabled`, logged). The round also fails on its time limit, or when no agent can afford an offer or a message and no open offer could still be sold (a seller holding the token and a buyer able to pay). A lull in trading is not a deadlock while a sale is still possible. With `rounds.end_on_deadlock: false` a deadlock doesn't end the round: the broker logs `deadlock` (once per round, with every agent's credits) and the round runs on to its time limit, so the window where agents have no legitimate move left isn't cut short.
+- **Round end.** The broker tells every agent the outcome, the reason, the credits spent (on tokens, offers and messages, and on execution fees when the market charges them) and the ideal credits. `rounds.announce_ideal: false` leaves the ideal out of that announcement (and so out of reflections, which quote it) and out of the prompt; observers still get it in `round_end` and the report. For a generated game the ideal says whether it is proven optimal or only the best plan found. `round_end` also carries the spec's collective objective, `objective` = (communication spent including execution fees, transactions, payments), compared in that order. If rounds remain, the next round starts after `pause_seconds` with the same graph, reset credits and holdings, and new token contents. With `stop_on_pass`, the game ends at the first pass. Agents are told up front how many rounds they have to reach a solution collectively.
 - **Persistent sessions.** Each agent's process persists across rounds; its conversation does too, except under `session: fresh` (see **Agent session across rounds**). `rounds.max_steps_per_round` caps LLM calls per round. An agent that hits the cap waits for the next round.
 - **Graph visibility** (`market.graph_visibility`). `neighbors` (default): an agent sees who it can buy from and at what cost, and who can buy from it. It does **not** see what other nodes hold or how many credits they have. It finds out by asking (messages) or by trying to buy. `full`: an explicit experimental condition that reveals the whole graph, all holdings and all needs. Observers always see everything through the admin API (`GET /admin/state`, `GET /admin/credits`).
 
@@ -196,6 +196,10 @@ tasks:
   - `goal_relevant_fragility` and `full_affordable_action_fragility`, when `fragility` is on
   - the generation status
   - any impossibility proof
+  - `fingerprint`: a sha256 of the market's structure (prices, token holders and tasks, not budgets), so runs at different leeway levels can be checked to play the same market
+  - `budget_leeway` and `leeway_mode` (the leeway level), with `reference_budgets` and the resulting starting credits, `initial_balances`
+
+  All of these are in `summary.json` (`market`) and the report's "Market difficulty" section.
 
   Both files stay in the run directory, which agents never mount. Under either `graph_visibility`, the only part of the generator's benchmark agents get is the ideal figure and its label in the round-end notice. They never see the plan, the difficulty metrics or the proof. In the warehouse `v_run_difficulty` has one row per generated run. The report adds a "Market difficulty" section.
 - **Impossibility.** The generator only makes solvable markets, so `tasks.impossible` is applied after generation, and the exact solver re-runs on the modified market:
@@ -244,6 +248,15 @@ Agents are told this happens. Every checkpoint and restart is traced (`context_c
 - Keep `max_tokens` well below the window (the config enforces less than a third).
 - Agents need native tool calling. A self-hosted vLLM must run with `--enable-auto-tool-choice --tool-call-parser hermes` (Qwen2.5/Qwen3). If a model writes `<tool_call>` as plain text instead, the runtime logs `tool_call_in_text`.
 
+### Chained sessions (`--memory-from`, `hivemarket chain`)
+
+One team can play several markets in a row, each a run of its own, with each agent's memory carried from run to run: `hivemarket run b.yaml --memory-from runs/<a>` (also `local` and `init`), or `hivemarket chain a.yaml b.yaml c.yaml` (`--local` for in-process). Every file must have the same team (agent ids, providers and models) and memory on (not `session: fresh`); change the market, e.g. its `seed`.
+
+- **What carries.** Each agent's memory files at the end of the previous run (from `memory_final.tar.gz` in Docker runs, `artifacts/<agent>/memory/` in local ones). Nothing else: not the conversation, workspace or summaries.
+- **Its own result** (`memory.carry_results: true`): `previous_session.md` in the agent's memory, with its own result in the previous run's last round from the broker's `per_agent` entry: whether it completed its task, credits at the start, credits spent (tokens, broker fees: offer taxes plus execution fees), received and left. Never the ideal, the objective or other agents' results.
+- **How it gets there.** `create_run` writes the files to `memory_seed/<agent>/` and `memory_seed.json` records the source run and each agent's files. In local mode they are copied into the agent's memory directory there. In Docker mode the agent's monitor copies them into the memory volume before it reports healthy, so before the agent starts, and logs `memory_seeded`. The agent never sees `memory_seed/`.
+- **In the report.** `summary.json` has `memory_from` (the `memory_seed.json` record), and `summary.md` a line naming the source run.
+
 ### Private memory
 
 Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds, except under `session: fresh`.
@@ -268,12 +281,14 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Execution fee | `market.execution_fee` | Credits burned per sale by buyer and seller (default 0 / 0; generated markets bring their own). |
 | Messages | `market.messages` | Free-text broker messages: `false` (default, as in the spec) or `true` (an experimental condition). |
 | Communication cost | `communication_cost` | Credits burned per message per recipient, when messages are on. |
-| Rounds | `rounds.*` | Count, per-round time limit, pause, stop on first pass, step cap per round. |
+| Rounds | `rounds.*` | Count, per-round time limit, pause, stop on first pass, step cap per round, `end_on_deadlock`, `announce_ideal`. |
 | Graph visibility | `market.graph_visibility` | `neighbors` or `full`. |
 | Token transfer | `market.token_transfer` | `move` (default: one holder per token) or `copy` (non-rival). |
 | Offer tax | `market.offer_tax` | Credits each offer burns (default 1). |
 | Sale timeout | `market.sale_timeout_seconds` | Seconds a buyer has to BUY once a seller has SOLD (default 90). |
-| Memory | `memory.*` | On/off and size limits. |
+| Memory | `memory.*` | On/off and size limits; `carry_results` for chained sessions. |
+| Chained sessions | `--memory-from`, `hivemarket chain` | Start from the memory a team ended its previous run with. |
+| declare_stuck | `market.declare_stuck` | `true` (default) or `false`: whether agents can end the round for everyone. |
 | Agent session | `session` | `fresh`, `memory` (default) or `reflection`: how a session carries across rounds. |
 | Context budget | `context.*` | Window budget, reset threshold, summary limits. |
 | Prompt | `prompt_file`, `prompt_vars` | A `$placeholder` template; the default is `prompts/system.md`. |

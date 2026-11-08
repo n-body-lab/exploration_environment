@@ -308,6 +308,7 @@ def analyze(run_dir: Path) -> dict[str, Any]:
                      | {"graph_ideal_credits": ideal.get("graph_ideal", {}).get("ideal_credits")},
             "market": {k: generated.get(k) for k in MARKET_KEYS} if generated else None,
             "session": sessions.pop() if len(sessions) == 1 else (sorted(sessions) or None),
+            "memory_from": _load_json(run_dir / "memory_seed.json"),  # chained sessions (orchestrator/carry.py)
             "rounds": rounds, "agents": agents_out,
             # credits spent, remaining and communication spent, for the game and per agent (#32)
             "scores": game_scores}
@@ -318,9 +319,14 @@ def analyze(run_dir: Path) -> dict[str, Any]:
 SIDE_CHANNEL_ATTEMPTS = {"off_channel_connection", "direct_message_tool"}
 
 
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text()) if path.exists() else None
+
+
 IDEAL_KEYS = ("ideal_credits", "solvable", "unreachable", "budget_shortfalls", "source", "ideal_status",
               "ideal_transfers", "ideal_execution_messages", "ideal_gross_payments")
-MARKET_KEYS = ("commit", "source", "seed", "n_agents", "n_tokens", "status", "optimality_status",
+MARKET_KEYS = ("commit", "source", "seed", "fingerprint", "budget_leeway", "leeway_mode", "initial_balances",
+               "reference_budgets", "n_agents", "n_tokens", "status", "optimality_status",
                "generation_attempts", "constraints_satisfied", "properties", "fragility", "impossibility")
 IDEAL_LABELS = {"optimal": "proven optimal for its objective", "feasible": "best plan known, not proven optimal",
                 "limit_reached": "best plan found before the search limit, not proven optimal",
@@ -373,6 +379,9 @@ def _difficulty_section(market: dict[str, Any]) -> list[str]:
              f"tokens, seed {market['seed']}. {generated}: {market['status']} (exact search: "
              f"{market['optimality_status']}); generation attempts {market['generation_attempts']}, constraints "
              f"satisfied {market['constraints_satisfied']}.",
+             "", f"Market fingerprint `{(market.get('fingerprint') or '?')[:16]}`; budget leeway "
+                 f"{market.get('budget_leeway')} ({market.get('leeway_mode')}); starting credits "
+                 f"{market.get('initial_balances')} (reference budgets {market.get('reference_budgets')}).",
              "", "| group | property | value |", "|---|---|---|"]
     for group, values in market["properties"].items():
         lines += [f"| {group} | {k} | {round(v, 3) if isinstance(v, float) else v} |" for k, v in values.items()]
@@ -400,6 +409,11 @@ def write_report(run_dir: Path) -> Path:
     lines.append(_ideal_line(summary["ideal"]))
     if summary["session"]:
         lines.append(_session_line(summary) + "\n")
+    if seed := summary.get("memory_from"):
+        carried = sum(len(f) for f in seed["files"].values())
+        lines.append(f"Chained session: memory carried from run `{seed['from_run']}` ({carried} files"
+                     + (f"; own results from its round {seed['results_round']}" if seed["carry_results"] else "")
+                     + ").\n")
     if summary["market"]:
         lines += _difficulty_section(summary["market"])
     lines += ["## Rounds", "", "| round | outcome | reason | credits spent | tokens | messages | fees | ideal | excess | "
