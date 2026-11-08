@@ -198,6 +198,31 @@
             el("svg:text", { x: x + w / 2, y: y + 12, "text-anchor": "middle", class: textCls, text: label }), w];
   }
 
+  // The broker's take: credits burned on offer taxes, messages and execution fees (sale proceeds go
+  // to the seller). Messages and fees are listed only when the market has them. A change flashes
+  // next to the title for a moment, like the change shown on a node's balance.
+  const TAKE_FLASH_SECONDS = 2.5, TAKE_W = 232;
+  function marketBox(rules, st, now) {
+    const fee = rules.execution_fee || {};
+    const parts = [["offers", "offer taxes"]];
+    if (rules.messages || st.runTake.messages) parts.push(["messages", "messages"]);
+    if (Object.values(fee).some(v => v) || st.runTake.fees) parts.push(["fees", "fees"]);
+    const breakdown = take => parts.map(([k, label]) => `${label} ${take[k]}`).join(" · ");
+    const last = st.takeLast;
+    const flash = last && now - last.ts < TAKE_FLASH_SECONDS;
+    const box = el("svg:g", { id: "market-take", transform: `translate(${1000 - TAKE_W - 8},8)` });
+    box.append(el("svg:rect", { width: TAKE_W, height: 84, rx: 8, class: "g-market" + (flash ? " flash" : "") }));
+    const title = el("svg:text", { x: 10, y: 19, class: "g-name" }, "Market's take");
+    if (flash) title.append(el("svg:tspan", { class: "g-up take-change", text: `  +${last.amount} ${last.part}` }));
+    title.append(el("svg:title", { text: "Credits the broker has burned. Sale prices go to the seller, so the broker " +
+                                          "keeps only taxes and fees." }));
+    box.append(title,
+      el("svg:text", { x: 10, y: 39, class: "g-take take-round", text: `this round ${st.take.total} cr` }),
+      el("svg:text", { x: 10, y: 54, class: "g-sub", text: breakdown(st.take) }),
+      el("svg:text", { x: 10, y: 73, class: "g-sub take-run", text: `this run ${st.runTake.total} cr · ${breakdown(st.runTake)}` }));
+    return box;
+  }
+
   function renderGraph() {
     const svg = $("graph");
     const world = S.meta.world || {};
@@ -309,6 +334,7 @@
     g.append(el("svg:text", { x: 16, y: 24, class: "g-round", text: head }));
     g.append(el("svg:text", { x: 16, y: 42, class: "g-round",
                               text: `spent this round: ${st.spent}` + (ideal != null ? ` · ideal ${ideal}` : "") }));
+    g.prepend(marketBox(world.rules || {}, st, now));  // under the graph: nodes and edges draw over it
     $("round").textContent = head;
     const offers = Object.values(st.orders), selling = offers.filter(o => o.status === "selling" || o.status === "accepted");
     $("graph-meta").textContent = `${offers.length - selling.length} open offers · ${selling.length} sales in progress`;

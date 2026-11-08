@@ -13,6 +13,9 @@
     const nodes = (world && world.nodes) || {};
     const s = { round: 0, phase: "pending", credits: {}, holds: {}, known: {}, available: null, escrow: {},
                 reserved: {}, orders: {}, completed: [], outcome: null, reason: null, spent: 0, seq: 0 };
+    s.take = emptyTake();     // this round
+    s.runTake = emptyTake();  // the whole run (carried across round_start)
+    s.takeLast = null;        // the latest change, {ts, part, amount}, for the box to flash
     s.startCredits = {};  // what each agent started the round with, to show the change since
     for (const [n, spec] of Object.entries(nodes)) {
       s.credits[n] = spec.credits;
@@ -25,6 +28,15 @@
 
   const copyLists = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, [...v]]));
 
+  // What the broker has taken out of circulation (offer taxes, messages, execution fees). Sale
+  // proceeds go to the seller, so these burned credits are the market's whole take.
+  const emptyTake = () => ({ offers: 0, messages: 0, fees: 0, total: 0 });
+  function addTake(s, part, amount, ts) {
+    if (!amount) return;
+    for (const take of [s.take, s.runTake]) { take[part] += amount; take.total += amount; }
+    s.takeLast = { ts, part, amount };
+  }
+
   // Market state after every market event with ts <= t (t = Infinity: everything).
   // graph_state rows are authoritative; the other events fill in what older runs don't log.
   function stateAt(world, marketEvents, t) {
@@ -36,7 +48,9 @@
       s.seq = d.seq || s.seq;
       switch (e.kind) {
         case "round_start":
-          s = Object.assign(initialState(world), { round: d.round, phase: "active", seq: s.seq });
+          // A new round resets credits, the round's take and its last change; the run's take carries on.
+          s = Object.assign(initialState(world), { round: d.round, phase: "active", seq: s.seq,
+                                                   runTake: s.runTake });
           break;
         case "graph_state":
           // Copies: the state is changed in place by later events, and the events are replayed
@@ -51,6 +65,10 @@
           if (d.completed) s.completed = [...d.completed];
           break;
         case "offer_made":
+          // The buyer pays the tax now (the graph_state row that follows agrees).
+          s.spent += d.tax || 0;
+          s.credits[d.buyer] = d.credits != null ? d.credits : (s.credits[d.buyer] || 0) - (d.tax || 0);
+          addTake(s, "offers", d.tax || 0, e.ts);
           s.orders[d.offer_id] = { id: d.offer_id, buyer: d.buyer, seller: d.seller, token: d.token,
                                    price: d.price, status: "open", ts: e.ts };
           break;
@@ -70,9 +88,13 @@
         case "exchange": {
           // Applied here as well as by the graph_state row that follows: that row comes a moment
           // later, and runs from before graph_state existed have only this.
-          s.spent += d.cost || 0;
-          s.credits[d.buyer] = (s.credits[d.buyer] || 0) - (d.cost || 0);
-          s.credits[d.seller] = (s.credits[d.seller] || 0) + (d.cost || 0);
+          // With execution fees: buyer -price-fee, seller +price-fee, market +both fees.
+          const bf = d.buyer_fee || 0, sf = d.seller_fee || 0;
+          s.spent += (d.cost || 0) + bf + sf;  // everything spent, as the broker's credits_spent
+          s.credits[d.buyer] = d.buyer_credits != null ? d.buyer_credits : (s.credits[d.buyer] || 0) - (d.cost || 0) - bf;
+          s.credits[d.seller] = d.seller_credits != null ? d.seller_credits
+                                                         : (s.credits[d.seller] || 0) + (d.cost || 0) - sf;
+          addTake(s, "fees", bf + sf, e.ts);
           s.holds[d.buyer] = [...new Set([...(s.holds[d.buyer] || []), d.token])].sort();
           s.known[d.buyer] = [...new Set([...(s.known[d.buyer] || []), d.token])].sort();
           if (d.moved !== false && rules.token_transfer !== "copy") {
@@ -82,7 +104,8 @@
         }
         case "message":
           s.spent += d.cost || 0;
-          s.credits[d.sender] = (s.credits[d.sender] || 0) - (d.cost || 0);
+          s.credits[d.sender] = d.credits != null ? d.credits : (s.credits[d.sender] || 0) - (d.cost || 0);
+          addTake(s, "messages", d.cost || 0, e.ts);
           break;
         case "round_end":
           s.phase = "between"; s.outcome = d.outcome; s.reason = d.reason; s.orders = {};
@@ -186,7 +209,12 @@
     const d = e.data || {};
     switch (e.kind) {
       case "http_request": return `${d.method} ${d.path}${d.query ? "?" + d.query : ""} → ${d.status} (${d.action})`;
-      case "exchange": return `${d.buyer} bought ${d.token} from ${d.seller} for ${d.cost}${d.relay ? " (relay)" : ""}`;
+      case "exchange": {
+        const fees = [d.buyer_fee ? `buyer fee ${d.buyer_fee}` : "", d.seller_fee ? `seller fee ${d.seller_fee}` : ""]
+          .filter(Boolean).join(", ");
+        return `${d.buyer} bought ${d.token} from ${d.seller} for ${d.cost}${fees ? ` (+ ${fees})` : ""}` +
+               `${d.relay ? " (relay)" : ""}`;
+      }
       case "message": return `${d.sender} → ${d.to}: ${short(d.body)}  [-${d.cost}]`;
       case "notice": return `to ${e.agent_id || "everyone"}: ${short(d.body)}`;
       case "graph_state": return `state #${d.state_seq} after ${d.cause}`;
@@ -212,7 +240,8 @@
       default:
         if (e.kind && (e.kind.startsWith("offer_") || e.kind.startsWith("sale_"))) {
           return `${e.kind.replace("_", " ")} ${d.offer_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +
-                 (d.price != null ? ` @${d.price}` : "") + (d.reason ? ` (${d.reason})` : "");
+                 (d.price != null ? ` @${d.price}` : "") + (d.tax ? `  [tax -${d.tax}]` : "") +
+                 (d.reason ? ` (${d.reason})` : "");
         }
         if (e.kind && e.kind.startsWith("order_")) {
           return `${e.kind.slice(6)} ${d.order_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +
