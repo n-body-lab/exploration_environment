@@ -29,6 +29,7 @@ from hivemarket.common.events import EventLog, JsonlSink
 from hivemarket.common.manifest import Manifest
 from hivemarket.common.config import ExperimentConfig
 from hivemarket.monitor.flows import FlowTracker, Packet
+from hivemarket.orchestrator.carry import SEED_DIR, seed_memory
 from hivemarket.monitor.fs import (PortProbe, ReadAuditor, SharedViewPublisher, WorkspaceRecorder,
                                    run_read_audit, run_workspace_watch)
 
@@ -131,6 +132,10 @@ def main() -> None:
     # --- private memory: same versioning, its own volume (never shared with other agents)
     memory = None
     if MEMORY.exists():
+        # A chained session (--memory-from) starts with the memory the agent ended its previous run with.
+        # Copied before the agent starts (it waits for this monitor to be healthy) and before versioning.
+        if seeded := seed_memory(run_dir / SEED_DIR / agent_id, MEMORY):
+            emit("memory_seeded", files=seeded, source=str(SEED_DIR))
         memory = WorkspaceRecorder(MEMORY, run_dir, agent_id, emit, max_bytes=cfg.monitoring.max_file_bytes,
                                    agent_root="/var/lib/hivemarket/memory", area="memory")
         thread(run_workspace_watch, memory, stop)

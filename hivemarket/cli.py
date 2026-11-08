@@ -4,6 +4,8 @@
   hivemarket run   experiments/baseline.yaml   create run dir, run in Docker, ship live, write report
   hivemarket local experiments/local_smoke.yaml  run in-process (scripted agents / dev)
   hivemarket init  experiments/x.yaml [--mode ...]  only create the run directory
+  hivemarket run|local|init ... --memory-from runs/<id>  a chained session: start with that run's memory
+  hivemarket chain a.yaml b.yaml ... [--local]  one team plays each in turn, memory carried from run to run
   hivemarket report runs/<run_id>              (re)build timeline.jsonl + summary.md
   hivemarket analyze runs/<run_id> [--judge-model M]  backchannel, collusion signals, exploration
   hivemarket calibrate-signals                 score the embedding tier on the labelled calibration set
@@ -44,18 +46,23 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="hivemarket")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    for name in ("run", "local", "init"):
+    for name in ("run", "local", "init", "chain"):
         sp = sub.add_parser(name)
-        sp.add_argument("experiment")
+        if name == "chain":
+            sp.add_argument("experiments", nargs="+", help="played in this order by the same team")
+            sp.add_argument("--local", action="store_true", help="run in-process instead of in Docker")
+        else:
+            sp.add_argument("experiment")
+            sp.add_argument("--run-id")
         sp.add_argument("--runs-dir", default="runs")
-        sp.add_argument("--run-id")
+        sp.add_argument("--memory-from", help="start each agent's memory with what it ended this run with")
         if name == "init":
             sp.add_argument("--mode", choices=["docker", "local"], default="docker")
         else:
             sp.add_argument("--no-ship", action="store_true", help="do not stream to the observatory")
-        if name == "run":
+        if name in ("run", "chain"):
             sp.add_argument("--no-build", action="store_true")
-        if name == "local":
+        if name in ("local", "chain"):
             sp.add_argument("--unsafe-local-shell", action="store_true",
                             help="allow LLM agents to run shell commands unsandboxed on this machine")
             sp.add_argument("--echo", action="store_true", help="print events as they happen")
@@ -128,11 +135,24 @@ def main() -> None:
         print(json.dumps(shipper.finish(status="ingested")))
         return
     if args.cmd == "init":
-        print(create_run(args.experiment, args.runs_dir, mode=args.mode, run_id=args.run_id))
+        print(create_run(args.experiment, args.runs_dir, mode=args.mode, run_id=args.run_id,
+                         memory_from=args.memory_from))
         return
+    if args.cmd == "chain":
+        previous = args.memory_from
+        for experiment in args.experiments:
+            run_dir = execute(args, experiment, "local" if args.local else "docker", memory_from=previous)
+            print(f"chain: {experiment} -> {run_dir}")
+            previous = run_dir
+        return
+    execute(args, args.experiment, "docker" if args.cmd == "run" else "local", run_id=args.run_id,
+            memory_from=args.memory_from)
 
-    mode = "docker" if args.cmd == "run" else "local"
-    run_dir = create_run(args.experiment, args.runs_dir, mode=mode, run_id=args.run_id)
+
+def execute(args: argparse.Namespace, experiment: str, mode: str, run_id: str | None = None,
+            memory_from: str | Path | None = None) -> Path:
+    """Create a run, play it, analyse it and write its report (`run`, `local` and each step of `chain`)."""
+    run_dir = create_run(experiment, args.runs_dir, mode=mode, run_id=run_id, memory_from=memory_from)
     print(f"run dir: {run_dir}")
     shipper = None if args.no_ship else make_shipper(run_dir)
     if shipper:
@@ -158,6 +178,7 @@ def main() -> None:
         print(write_report(run_dir).read_text())
         if shipper:
             print(f"shipped: {shipper.finish(status)}")
+    return run_dir
 
 
 if __name__ == "__main__":

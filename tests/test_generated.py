@@ -405,6 +405,33 @@ async def test_an_unexpected_reconciliation_error_never_stops_the_market(tmp_pat
 
 
 @needs_generator
+def test_leeway_levels_play_the_same_market_and_are_logged():
+    """The fingerprint covers prices, holders and tasks but not budgets, so levels of one market share it."""
+    levels = {lw: build(config({"market": {"preset": "medium", "budget_leeway": lw}}, agents=6, seed=3))[0]["generated"]
+              for lw in (0.0, 0.5)}
+    low, high = levels[0.0], levels[0.5]
+    assert low["budget_leeway"] == 0.0 and high["budget_leeway"] == 0.5 and low["leeway_mode"] == "relative"
+    assert low["fingerprint"] == high["fingerprint"] and len(low["fingerprint"]) == 64
+    assert low["market"]["prices"] == high["market"]["prices"]
+    assert low["reference_budgets"] == high["reference_budgets"]
+    assert sum(high["initial_balances"]) > sum(low["initial_balances"])
+    other = build(config({"market": {"preset": "medium"}}, agents=6, seed=4))[0]["generated"]
+    assert other["fingerprint"] != low["fingerprint"]
+
+
+@needs_generator
+@pytest.mark.parametrize("name", ["session_main", "session_exploratory"])
+def test_the_session_arms_build_one_round_without_declare_stuck(name):
+    cfg = ExperimentConfig.load(ROOT / "experiments" / f"{name}.yaml")
+    world, _ = build(cfg)
+    assert world["rounds"]["count"] == 1 and world["rules"]["declare_stuck"] is False
+    assert world["rounds"]["end_on_deadlock"] is False and world["rounds"]["announce_ideal"] is False
+    assert world["rules"]["messages"] is False and cfg.affordance.disclose_rule is False
+    assert world["generated"]["budget_leeway"] == 0.3
+    assert cfg.memory.enabled is (name == "session_exploratory")
+
+
+@needs_generator
 async def test_the_credit_floor_raises_budgets_and_the_reference_still_reconciles(tmp_path):
     """tasks.market.minimum_initial_credits: applied after leeway; every agent starts with at least it (b69351d)."""
     from hivemarket_generator import decode_result, loads
