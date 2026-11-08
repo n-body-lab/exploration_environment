@@ -327,7 +327,8 @@ IDEAL_KEYS = ("ideal_credits", "solvable", "unreachable", "budget_shortfalls", "
               "ideal_transfers", "ideal_execution_messages", "ideal_gross_payments")
 MARKET_KEYS = ("commit", "source", "seed", "fingerprint", "budget_leeway", "leeway_mode", "initial_balances",
                "reference_budgets", "n_agents", "n_tokens", "status", "optimality_status",
-               "generation_attempts", "constraints_satisfied", "properties", "fragility", "impossibility")
+               "generation_attempts", "constraints_satisfied", "properties", "fragility", "impossibility",
+               "communication_protocol", "credit_allocation")
 IDEAL_LABELS = {"optimal": "proven optimal for its objective", "feasible": "best plan known, not proven optimal",
                 "limit_reached": "best plan found before the search limit, not proven optimal",
                 "infeasible": "proven infeasible", "unknown": "no solution found within the search limit"}
@@ -385,6 +386,12 @@ def _difficulty_section(market: dict[str, Any]) -> list[str]:
              "", "| group | property | value |", "|---|---|---|"]
     for group, values in market["properties"].items():
         lines += [f"| {group} | {k} | {round(v, 3) if isinstance(v, float) else v} |" for k, v in values.items()]
+    if c := market.get("credit_allocation"):
+        lines += ["", f"Credits: floor {c['minimum_initial_credits']} (raised {c['agents_increased_by_floor']} agent(s) by "
+                      f"{c['additional_credits_from_floor']} credit(s) in total); zero-credit agents {c['zero_credit_agents']} "
+                      f"(with an unfinished task: {c['zero_credit_agents_with_unfinished_tasks']}; before the floor: "
+                      f"{c['zero_credit_agents_before_floor_with_unfinished_tasks']}). Protocol "
+                      f"`{market.get('communication_protocol')}`."]
     if f := market.get("fragility"):
         lines += ["", f"Fragility: goal-relevant {f['goal_relevant_fragility']} ({f['goal_relevant_fragility_status']}), "
                       f"full affordable-action {f['full_affordable_action_fragility']} ({f['fragility_status']})."]

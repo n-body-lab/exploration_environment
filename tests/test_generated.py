@@ -18,7 +18,7 @@ TESTS = Path(__file__).parent
 needs_generator = pytest.mark.skipif(importlib.util.find_spec("hivemarket_generator") is None,
                                      reason='market_generator is not installed: pip install -e ".[generator]"')
 # Observer-only values from world.json / generator.json that must never show up in what agents see.
-GENERATOR_ONLY = ("ad0fb8c", "indirect_dependency_fraction", "reference_budgets", "ideal_status", "graph_ideal",
+GENERATOR_ONLY = ("b69351d", "indirect_dependency_fraction", "reference_budgets", "ideal_status", "graph_ideal",
                   "schedule", "fragility", "optimality_status")
 
 
@@ -110,7 +110,9 @@ def test_a_generator_export_converts_to_our_graph():
     assert ideal["graph_ideal"]["ideal_credits"] == 3  # our model agrees here: one direct purchase
     assert (world["generated"]["agents"], world["generated"]["tokens"]) == (names, ["T1", "T2"])
     original = json.loads((TESTS / "data" / "market_generator_medium.json").read_text())["data"]
-    assert json.loads(export)["data"]["market"] == original["market"]
+    # the same market; since b69351d the export states its protocol, which this older file left implicit
+    assert "communication_protocol" not in original["market"]
+    assert json.loads(export)["data"]["market"] == original["market"] | {"communication_protocol": "offer_buy"}
 
 
 @needs_generator
@@ -427,3 +429,39 @@ def test_the_session_arms_build_one_round_without_declare_stuck(name):
     assert world["rules"]["messages"] is False and cfg.affordance.disclose_rule is False
     assert world["generated"]["budget_leeway"] == 0.3
     assert cfg.memory.enabled is (name == "session_exploratory")
+
+
+@needs_generator
+async def test_the_credit_floor_raises_budgets_and_the_reference_still_reconciles(tmp_path):
+    """tasks.market.minimum_initial_credits: applied after leeway; every agent starts with at least it (b69351d)."""
+    from hivemarket_generator import decode_result, loads
+
+    floor = 5
+    world, export = build(config({"market": {"n_tokens": 4, "budget_leeway": 0.0, "minimum_initial_credits": floor}}))
+    gen = world["generated"]
+    alloc = gen["credit_allocation"]
+    assert gen["communication_protocol"] == "offer_buy" and alloc["minimum_initial_credits"] == floor
+    assert all(n["credits"] >= floor for n in world["nodes"].values())
+    assert [world["nodes"][a]["credits"] for a in gen["agents"]] == list(alloc["initial_credits"]) == gen["initial_balances"]
+    assert list(alloc["initial_credits"]) == [max(floor, c) for c in alloc["initial_credits_before_floor"]]
+    assert alloc["zero_credit_agents"] == 0
+    # the floor never changes what the reference needs, and the reference still plays and reconciles
+    assert list(alloc["reference_budgets"]) == gen["reference_budgets"]
+    reference = decode_result(loads(export)).reference_solution
+    names, tokens = gen["agents"], gen["tokens"]
+    b = await broker_for(world, tmp_path)
+    for a in reference.actions:
+        await trade(b, names[a.buyer], tokens[a.token], names[a.seller])
+    await submit_all(b)
+    res = b.results[0]
+    assert res["outcome"] == "pass" and res["economic_validation"]["status"] == "valid"
+
+
+@needs_generator
+def test_an_offer_tax_above_one_is_played_as_the_legacy_protocol():
+    """offer_buy is exactly one 1-credit OFFER per sale; a higher tax is named legacy_fixed_messages, not inferred."""
+    world, _ = build(config(market={"offer_tax": 2}))
+    gen = world["generated"]
+    assert gen["offer_tax"]["offer_tax"] == 2  # raised for play, and the ideal re-proven
+    assert gen["communication_protocol"] == "legacy_fixed_messages"  # the market as played
+    assert gen["market"]["communication_protocol"] == "legacy_fixed_messages"  # so reconcile decodes it as such
