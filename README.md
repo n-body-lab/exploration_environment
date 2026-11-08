@@ -22,7 +22,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/hivemarket run experiments/generated_medium.yaml    # LLM agents; also generated_easy / _hard / _fragile
 
 # Real experiment: needs Docker running and provider keys in the environment
-export ANTHROPIC_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ADAPTION_API_KEY as needed
+export ADAPTION_API_KEY=...        # plus OPENAI_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DASHSCOPE_API_KEY / HF_TOKEN / ANTHROPIC_API_KEY as needed
 .venv/bin/hivemarket run experiments/baseline.yaml
 
 # Rebuild the report for an existing run / (re)ship it to the observatory

@@ -5,6 +5,12 @@ the token belongs to, the agent the source IP belongs to, the full request
 and response bodies, status and latency. On top of that:
 
   action_rejected   every action the broker refuses (MarketError), whatever the reason
+  action_attempt    every attempted action (offer, withdraw, sell, buy, send_message, submit,
+                    declare_stuck), successful or not, in one shape: action, outcome (ok|refused),
+                    reason, offer_id, token, counterparty, and the caller's credits and available
+                    after it. Agents never see reason codes that reveal another agent's state
+                    (REVEALS_OTHERS), or any reason code with rules.opaque_errors: they get
+                    {"error": "not_completed"}; the specific reason stays in these logs.
   invalid_request   requests that never reach a route: malformed body or query (422),
                     unknown path (404), wrong method (405)
   admin_request     every call to an observer endpoint, allowed or not
@@ -30,7 +36,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from hivemarket.common.events import EventLog
 from hivemarket.common.manifest import Manifest, bearer
-from hivemarket.market.state import Broker, MarketError
+from hivemarket.market.state import GENERIC_ERROR, REVEALS_OTHERS, Broker, MarketError
+
+# Actions that try to change the market (reads such as status, graph and inbox aren't attempts).
+ACTIONS = {"offer", "withdraw", "sell", "buy", "send_message", "submit", "declare_stuck"}
 
 
 class OfferIn(BaseModel):
@@ -94,15 +103,21 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
                 # A token is being used from another agent's machine.
                 log.emit("identity_mismatch", agent_id=agent_id, token_agent=agent_id,
                          source_agent=ip_agent.id, source_ip=src_ip, action=action)
+            reason = None
             try:
                 result = fn(agent_id)
                 if asyncio.iscoroutine(result):
                     result = await result
                 status, body = 200, result
             except MarketError as e:
+                reason = e.code
                 status, body = e.status, {"error": e.code, "message": e.message}
                 log.emit("action_rejected", agent_id=agent_id, action=action, round=market.round_no,
                          status=e.status, reason=e.code, request=payload)
+                if e.code in REVEALS_OTHERS or market.opaque_errors:
+                    body = dict(GENERIC_ERROR)
+            if action in ACTIONS:
+                log_attempt(agent_id, action, payload, body, reason)
 
         log.emit(
             "http_request",
@@ -124,6 +139,24 @@ def create_app(market: Broker, manifest: Manifest, log: EventLog, final_state_pa
             log.emit("unauthenticated_request", agent_id=ip_agent.id if ip_agent else None,
                      source_ip=src_ip, path=request.url.path)
         return JSONResponse(body if isinstance(body, (dict, list)) else {"result": body}, status_code=status)
+
+    def log_attempt(agent_id: str, action: str, payload: dict[str, Any], body: Any, reason: str | None) -> None:
+        """One action_attempt event per attempted action, whatever the outcome (log only)."""
+        offer_id = payload.get("offer_id") or (body.get("offer_id") if isinstance(body, dict) else None)
+        o = market.offers.get(offer_id) if offer_id else None
+        token = payload.get("token") or (o or {}).get("token")
+        if action == "offer":
+            counterparty = payload.get("seller")
+        elif action == "send_message":
+            counterparty = payload.get("to")
+        elif o:
+            counterparty = o["seller"] if o["buyer"] == agent_id else o["buyer"]
+        else:
+            counterparty = None
+        log.emit("action_attempt", agent_id=agent_id, action=action, round=market.round_no,
+                 outcome="refused" if reason else "ok", reason=reason, offer_id=offer_id, token=token,
+                 counterparty=counterparty, credits=market.credits.get(agent_id),
+                 available=market.available(agent_id) if agent_id in market.credits else None)
 
     def caller(request: Request) -> tuple[str | None, str | None]:
         """Source IP and the agent behind a request outside handle() (a probe of the market itself).

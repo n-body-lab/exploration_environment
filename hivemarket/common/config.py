@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from pathlib import Path
 from typing import Any, Literal
 
@@ -279,6 +281,10 @@ class MarketConfig(BaseModel):
     # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
     # comes from the market itself; set it only to check it matches.
     execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
+    # Refused actions: agents always get a generic "not_completed" when the specific reason would reveal
+    # another agent's state (its credits, holdings or pending sales). With opaque_errors, every refusal is
+    # generic, including ones about the agent's own state ("you don't hold X"). The log keeps the reason.
+    opaque_errors: bool = False
     # Whether agents get `declare_stuck`, which ends the round as a failure for everyone. Off, the broker
     # refuses it (declare_stuck_disabled) and the round runs on to its time limit or a deadlock.
     declare_stuck: bool = True
@@ -369,6 +375,9 @@ class ExperimentConfig(BaseModel):
             self._check_generated()
         if self.session == "fresh":
             self._check_fresh()
+        if self.communication_cost > 0 and not self.market.messages:
+            warnings.warn(f"communication_cost is {self.communication_cost} but market.messages is off, so it has "
+                          "no effect: set market.messages: true to price free-text messages", stacklevel=2)
         return self
 
     def _check_fresh(self) -> None:

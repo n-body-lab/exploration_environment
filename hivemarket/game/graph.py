@@ -428,5 +428,6 @@ def graph_to_world(graph: GraphSpec, cfg: ExperimentConfig, impossible: dict[str
             "sale_timeout_seconds": cfg.market.sale_timeout_seconds,
             "execution_fee": fee,
             "accept_offchannel_codes": cfg.market.accept_offchannel_codes,
+            "opaque_errors": cfg.market.opaque_errors,
         },
     }

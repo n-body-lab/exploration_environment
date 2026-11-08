@@ -64,6 +64,14 @@ from hivemarket.game.generated import reconcile
 from hivemarket.game.graph import token_contents
 
 LIVE = ("open", "pending")  # offer states that can still lead to a sale; pending = SELL->BUY in progress
+# Why an offer can no longer be acted on, by its status (reason codes for the log, #32).
+CLOSED_REASON = {"executed": "offer_filled", "withdrawn": "offer_withdrawn", "cleared": "offer_cleared"}
+# Refusals whose specific reason or message would tell the caller about another agent's state (its
+# credits or holdings). Agents get a generic "not_completed" instead; the log keeps the reason. With
+# rules.opaque_errors every refusal is generic. (token_reserved isn't here: it only happens when the seller
+# itself already has a sale of that token pending, so it's about the caller's own state.)
+REVEALS_OTHERS = {"buyer_cannot_pay", "buyer_holds_token"}
+GENERIC_ERROR = {"error": "not_completed", "message": "Not completed."}
 
 
 def seller_fee_key(offer_id: str) -> str:
@@ -119,6 +127,7 @@ class Broker:
         self.messages_enabled = bool(rules.get("messages", False))
         # Whether a correct answer counts when it uses codes the agent never got through the broker.
         self.accept_offchannel_codes = bool(rules.get("accept_offchannel_codes", False))
+        self.opaque_errors = bool(rules.get("opaque_errors", False))
         self.stuck_enabled = bool(rules.get("declare_stuck", True))
         fee = rules.get("execution_fee") or {}
         self.fee = {"buyer": int(fee.get("buyer", 0)), "seller": int(fee.get("seller", 0))}
@@ -179,7 +188,7 @@ class Broker:
         self.log.emit("round_start", round=n, of=self.rounds_total, deadline=self.round_deadline,
                       contents=self.contents, ideal_credits=self.ideal.get("ideal_credits"),
                       credits=dict(self.credits), offer_tax=self.offer_tax,
-                      sale_timeout_seconds=self.sale_timeout)
+                      sale_timeout_seconds=self.sale_timeout, config=self.config())
         self._record_state("round_start", None)
         await self._publish("*", f"Round {n} of {self.rounds_total} has started. Credits and tokens are reset and "
                                  f"token contents are new; call get_status. You have {int(self.round_seconds)}s.",
@@ -214,6 +223,13 @@ class Broker:
         return {"total": paid + messages + taxes + fees, "exchanges": paid, "communication": messages + taxes,
                 "offers": taxes, "messages": messages, "fees": fees}
 
+    def config(self) -> dict[str, Any]:
+        """The run's cost settings, logged on every round_start and round_end so runs can be grouped by them."""
+        return {"offer_tax": self.offer_tax, "communication_cost": self.comm_cost,
+                "messages_enabled": self.messages_enabled, "execution_fee": dict(self.fee),
+                "sale_timeout_seconds": self.sale_timeout, "token_transfer": self.token_transfer,
+                "opaque_errors": self.opaque_errors, "accept_offchannel_codes": self.accept_offchannel_codes}
+
     def _credits_check(self, burned: int) -> dict[str, Any]:
         """Exchanges move credits between agents; only offer taxes, messages and execution fees destroy them."""
         start = sum(int(s["credits"]) for s in self.spec.values())
@@ -239,12 +255,17 @@ class Broker:
                                      for x in self.exchanges),
                 "received": sum(x["cost"] for x in self.exchanges if x["seller"] == n),
                 "credits_left": self.credits[n],
+                # the three scores, named the same at every level (agent, round, game)
+                "credits_remaining": self.credits[n],
                 "completed": n in self.completed,
                 "offers_made": sum(o["buyer"] == n for o in self.offers.values()),
                 "offers_received": sum(o["seller"] == n for o in self.offers.values()),
             }
             for n in self.agents
         }
+        for a in per_agent.values():
+            a["communication_spent"] = a["spent_on_offers"] + a["spent_on_messages"]
+            a["credits_spent"] = a["spent_on_tokens"] + a["communication_spent"] + a["spent_on_fees"]
         talk: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         for m in self.messages:
             for r in m["recipients"]:
@@ -273,6 +294,11 @@ class Broker:
             "stuck": self.stuck,
             "per_agent": per_agent,
             "credits_remaining": dict(self.credits),
+            # Scores (#32): total spent (gross: prices, offer taxes, messages, fees), credits remaining
+            # and communication spent (offers + messages); the same names per agent and per game.
+            "scores": {"credits_spent": spent["total"], "credits_remaining": sum(self.credits.values()),
+                       "communication_spent": spent["communication"]},
+            "config": self.config(),
             "credits_check": self._credits_check(spent["communication"] + spent["fees"]),
             "who_spoke_to_whom": {k: dict(v) for k, v in talk.items()},
             "exchanges": self.exchanges,
@@ -312,7 +338,8 @@ class Broker:
                                 outcome=outcome, objective=result["objective"])
             self.log.emit("game_over", rounds_played=self.round_no,
                           outcomes=[r["outcome"] for r in self.results],
-                          credits_spent=[r["credits_spent"] for r in self.results])
+                          credits_spent=[r["credits_spent"] for r in self.results],
+                          scores=self._game_scores(), config=self.config())
             await self._publish("*", "The game is over.", event="game_over")
             self.close("game_over")
         else:
@@ -323,6 +350,15 @@ class Broker:
         async with self._cond:
             self._cond.notify_all()
         return result
+
+    def _game_scores(self) -> dict[str, Any]:
+        """Scores for the whole game (every round played), overall and per agent. Credits are reset
+        each round, so credits_remaining is summed over rounds; with one round it is the end balance."""
+        keys = ("credits_spent", "credits_remaining", "communication_spent")
+        total: dict[str, Any] = {k: sum(r["scores"][k] for r in self.results) for k in keys}
+        total["per_agent"] = {n: {k: sum(r["per_agent"][n][k] for r in self.results) for k in keys}
+                              for n in self.agents}
+        return total
 
     def _ideal_text(self) -> str:
         """The ideal as agents are told it. A generated game's is the generator's plan, which minimises
@@ -400,6 +436,8 @@ class Broker:
                       open_offers=sorted(i for i, o in self.offers.items() if o["status"] == "open"),
                       pending_sales=sorted(i for i, o in self.offers.items() if o["status"] == "pending"),
                       submissions=dict(self.submissions), completed=sorted(self.completed),
+                      # could still act through the broker: afford an offer, or hold a token to sell
+                      could_act={n: self.available(n) >= self.offer_tax or bool(self.holds[n]) for n in self.agents},
                       **detail)
 
     def _require_active(self, agent_id: str) -> None:
@@ -606,8 +644,8 @@ class Broker:
         self._require_active(agent_id)
         o = self._get_offer(agent_id, "withdraw", offer_id, "buyer")
         if o["status"] not in LIVE:
-            self._offer_failed(agent_id, "withdraw", 409, "offer_closed", f"Offer {offer_id} is already {o['status']}.",
-                               offer_id=offer_id, offer_status=o["status"])
+            self._offer_failed(agent_id, "withdraw", 409, CLOSED_REASON[o["status"]],
+                               f"Offer {offer_id} is already {o['status']}.", offer_id=offer_id, offer_status=o["status"])
         was = o["status"]
         self._release(o)
         o.update(status="withdrawn", closed_at=now())
@@ -634,7 +672,7 @@ class Broker:
         if o["status"] == "pending":
             fail(409, "sale_pending", f"A sale on offer {offer_id} is already waiting for {buyer} to buy.")
         if o["status"] != "open":
-            fail(409, "offer_closed", f"Offer {offer_id} is {o['status']}.", offer_status=o["status"])
+            fail(409, CLOSED_REASON[o["status"]], f"Offer {offer_id} is {o['status']}.", offer_status=o["status"])
         if tok not in self.holds[agent_id]:
             fail(409, "seller_lacks_token", f"You don't hold {tok}. The offer stays open; sell when you have it.",
                  seller_previously_held=tok in self.known[agent_id],
@@ -683,7 +721,9 @@ class Broker:
         self._require_active(agent_id)
         o = self._get_offer(agent_id, "buy", offer_id, "buyer")
         if o["status"] != "pending":
-            self._offer_failed(agent_id, "buy", 409, "no_pending_sale",
+            # closed, or open again because a sale lapsed (the buyer didn't confirm in time), or never sold
+            code = CLOSED_REASON.get(o["status"]) or ("buy_timeout" if o.get("lapsed_at") else "no_pending_sale")
+            self._offer_failed(agent_id, "buy", 409, code,
                                f"Offer {offer_id} is {o['status']}: there is no sale to complete. A seller has to "
                                "sell first.", offer_id=offer_id, offer_status=o["status"])
         tok, seller, cost = o["token"], o["seller"], o["price"]
@@ -738,7 +778,7 @@ class Broker:
         due = [o for o in self.offers.values() if o["status"] == "pending" and t >= o["expires_at"]]
         for o in due:
             self._release(o)
-            o.update(status="open", expires_at=None)
+            o.update(status="open", expires_at=None, lapsed_at=t)
             oid, tok, buyer, seller = o["offer_id"], o["token"], o["buyer"], o["seller"]
             self.log.emit("sale_lapsed", agent_id=None, offer_id=oid, round=self.round_no, buyer=buyer, seller=seller,
                           token=tok, timeout_seconds=self.sale_timeout)

@@ -115,3 +115,71 @@ test("offers: open, selling, lapsed back to open, then closed by the completed s
   assert.strictEqual(end.credits.x - end.startCredits.x, 5);
   assert.match(HM.summarize(m[1]), /offer made off-1 z ← x T @5/);
 });
+
+test("market's take: offer tax on an offer, nothing on a plain sale, fees when the market has them", () => {
+  const w = { nodes: { x: { credits: 20, holds: ["T", "U"] }, z: { credits: 10, holds: [], needs: ["T", "U"] } },
+              rules: { token_transfer: "move" } };
+  const ev = (ts, kind, data) => ({ event_id: String(ts), ts, source: "market", kind, data });
+  const m = [ev(1, "round_start", { round: 1 }),
+             ev(2, "offer_made", { offer_id: "off-1", buyer: "z", seller: "x", token: "T", price: 5, tax: 1 }),
+             ev(3, "sale_started", { offer_id: "off-1" }), ev(4, "sale_completed", { offer_id: "off-1" }),
+             ev(4.1, "exchange", { buyer: "z", seller: "x", token: "T", cost: 5 }),
+             ev(5, "offer_made", { offer_id: "off-2", buyer: "z", seller: "x", token: "U", price: 3, tax: 1 }),
+             ev(6, "exchange", { buyer: "z", seller: "x", token: "U", cost: 3, buyer_fee: 2, seller_fee: 1 }),
+             ev(7, "round_end", { round: 1, outcome: "pass" }),
+             ev(8, "round_start", { round: 2 }),
+             ev(9, "offer_made", { offer_id: "off-3", buyer: "z", seller: "x", token: "T", price: 5, tax: 1 })];
+  const take = t => HM.stateAt(w, m, t).take;
+  assert.deepStrictEqual(take(2), { offers: 1, messages: 0, fees: 0, total: 1 });   // the offer's tax
+  assert.strictEqual(take(4.1).total, 1);                                           // a sale: proceeds go to the seller
+  assert.deepStrictEqual(take(6), { offers: 2, messages: 0, fees: 3, total: 5 });   // + both execution fees
+  assert.strictEqual(HM.stateAt(w, m, 6).spent, 1 + 5 + 1 + 3 + 3);                 // taxes, prices, fees
+  const sale = HM.stateAt(w, m, 6);  // buyer -price-fee, seller +price-fee, market +fees
+  assert.strictEqual(sale.credits.z - sale.startCredits.z, -1 - 5 - 1 - 3 - 2);
+  assert.strictEqual(sale.credits.x - sale.startCredits.x, 5 + 3 - 1);
+  assert.deepStrictEqual(sale.takeLast, { ts: 6, part: "fees", amount: 3 });
+  // A new round resets the round's take; the run's take keeps adding up.
+  assert.strictEqual(take(8).total, 0);
+  const end = HM.stateAt(w, m, Infinity);
+  assert.strictEqual(end.take.total, 1);
+  assert.deepStrictEqual(end.runTake, { offers: 3, messages: 0, fees: 3, total: 6 });
+});
+
+test("market's take at each round end equals the credits the broker burned (credits_check)", () => {
+  const ends = market.filter(e => e.kind === "round_end");
+  assert.ok(ends.length >= 1);
+  let run = 0;
+  const start = Object.values(world.nodes).reduce((sum, n) => sum + n.credits, 0);
+  for (const e of ends) {
+    const s = HM.stateAt(world, market, e.ts);
+    assert.strictEqual(s.take.total, e.data.credits_check.burned, `round ${e.data.round}`);
+    run += e.data.credits_check.burned;
+    assert.strictEqual(s.runTake.total, run);
+    // "spent this round" counts everything spent, taxes and fees included, as the broker does
+    assert.strictEqual(s.spent, e.data.credits_spent, `round ${e.data.round}`);
+    // and it is what's missing from the agents' credits
+    const now = Object.values(e.data.credits_remaining).reduce((sum, c) => sum + c, 0);
+    assert.strictEqual(start - now, s.take.total);
+  }
+  assert.ok(run > 0, "the scripted run makes offers, so the market takes something");
+});
+
+test("a new round doesn't flash the last round's change; the broker's logged balances win", () => {
+  const w = { nodes: { x: { credits: 20, holds: ["T"] }, z: { credits: 10, holds: [], needs: ["T"] } },
+              rules: { token_transfer: "move" } };
+  const ev = (ts, kind, data) => ({ event_id: String(ts), ts, source: "market", kind, data });
+  const m = [ev(1, "round_start", { round: 1 }),
+             ev(2, "offer_made", { offer_id: "off-1", buyer: "z", seller: "x", token: "T", price: 5, tax: 1, credits: 9 }),
+             ev(3, "exchange", { buyer: "z", seller: "x", token: "T", cost: 5, buyer_fee: 1, seller_fee: 0,
+                                 buyer_credits: 2, seller_credits: 25 }),  // the broker's numbers, not 3 and 25
+             ev(4, "round_end", { round: 1, outcome: "fail" }),
+             ev(5, "round_start", { round: 2 })];
+  const sale = HM.stateAt(w, m, 3);
+  assert.deepStrictEqual([sale.credits.z, sale.credits.x], [2, 25]);
+  assert.match(HM.summarize(m[2]), /bought T from x for 5 \(\+ buyer fee 1\)/);
+  assert.match(HM.summarize(m[1]), /\[tax -1\]/);
+  const next = HM.stateAt(w, m, 5);
+  assert.strictEqual(next.takeLast, null);  // nothing to flash next to "this round 0"
+  assert.strictEqual(next.take.total, 0);
+  assert.strictEqual(next.runTake.total, 2);
+});
