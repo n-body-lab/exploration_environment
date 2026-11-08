@@ -175,9 +175,74 @@ STATEMENTS = [
            JSONExtractRaw(data, 'who_spoke_to_whom') AS who_spoke_to_whom,
            JSONExtractRaw(data, 'credits_remaining') AS credits_remaining,
            JSONExtractBool(data, 'credits_check', 'consistent') AS credits_consistent,
-           JSONExtractRaw(data, 'per_agent') AS per_agent
+           JSONExtractRaw(data, 'per_agent') AS per_agent,
+           JSONExtractInt(data, 'scores', 'credits_remaining') AS credits_remaining_total,
+           JSONExtractInt(data, 'scores', 'communication_spent') AS communication_spent,
+           JSONExtractInt(data, 'config', 'offer_tax') AS offer_tax,
+           JSONExtractInt(data, 'config', 'communication_cost') AS communication_cost,
+           JSONExtractBool(data, 'config', 'messages_enabled') AS messages_enabled
     FROM {DATABASE}.events FINAL
     WHERE source = 'market' AND kind = 'round_end'
+    """,
+    # Scores per run, agent and round (from round_end), plus one game row per agent (round = 0,
+    # from game_over: summed over the rounds played). Grouped by the run's cost settings (#32).
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_scores AS
+    SELECT run_id, ts, JSONExtractUInt(data, 'round') AS round, 'round' AS level, a.1 AS agent,
+           JSONExtractInt(a.2, 'credits_spent') AS credits_spent,
+           JSONExtractInt(a.2, 'credits_remaining') AS credits_remaining,
+           JSONExtractInt(a.2, 'communication_spent') AS communication_spent,
+           JSONExtractInt(data, 'config', 'offer_tax') AS offer_tax,
+           JSONExtractInt(data, 'config', 'communication_cost') AS communication_cost,
+           JSONExtractBool(data, 'config', 'messages_enabled') AS messages_enabled
+    FROM {DATABASE}.events FINAL
+    ARRAY JOIN JSONExtractKeysAndValuesRaw(data, 'per_agent') AS a
+    WHERE source = 'market' AND kind = 'round_end'
+    UNION ALL
+    SELECT run_id, ts, toUInt64(0) AS round, 'game' AS level, a.1 AS agent,
+           JSONExtractInt(a.2, 'credits_spent') AS credits_spent,
+           JSONExtractInt(a.2, 'credits_remaining') AS credits_remaining,
+           JSONExtractInt(a.2, 'communication_spent') AS communication_spent,
+           JSONExtractInt(data, 'config', 'offer_tax') AS offer_tax,
+           JSONExtractInt(data, 'config', 'communication_cost') AS communication_cost,
+           JSONExtractBool(data, 'config', 'messages_enabled') AS messages_enabled
+    FROM {DATABASE}.events FINAL
+    ARRAY JOIN JSONExtractKeysAndValuesRaw(data, 'scores', 'per_agent') AS a
+    WHERE source = 'market' AND kind = 'game_over'
+    """,
+    # Every attempted action, successful or refused, in one shape (#32).
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_actions AS
+    SELECT run_id, ts, agent_id AS agent,
+           JSONExtractUInt(data, 'seq') AS seq,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractString(data, 'action') AS action,
+           JSONExtractString(data, 'outcome') AS outcome,
+           JSONExtract(data, 'reason', 'Nullable(String)') AS reason,
+           JSONExtract(data, 'offer_id', 'Nullable(String)') AS offer_id,
+           JSONExtract(data, 'token', 'Nullable(String)') AS token,
+           JSONExtract(data, 'counterparty', 'Nullable(String)') AS counterparty,
+           JSONExtract(data, 'credits', 'Nullable(Int64)') AS credits,
+           JSONExtract(data, 'available', 'Nullable(Int64)') AS available
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind = 'action_attempt'
+    """,
+    # Each agent's inventory after every market change (one row per graph_state and agent): the state
+    # at any moment is an ASOF join on (run_id, agent, ts) (#32).
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_inventory AS
+    SELECT run_id, ts,
+           JSONExtractUInt(data, 'seq') AS seq,
+           JSONExtractUInt(data, 'state_seq') AS state_seq,
+           JSONExtractUInt(data, 'round') AS round,
+           agent,
+           JSONExtractInt(data, 'credits', agent) AS credits,
+           JSONExtractInt(data, 'available', agent) AS available,
+           JSONExtract(data, 'holdings', agent, 'Array(String)') AS holdings,
+           JSONExtractBool(data, 'could_act', agent) AS could_act
+    FROM {DATABASE}.events FINAL
+    ARRAY JOIN JSONExtractKeys(data, 'credits') AS agent
+    WHERE source = 'market' AND kind = 'graph_state'
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_balances AS
@@ -248,6 +313,19 @@ STATEMENTS = [
        OR (kind = 'message' AND JSONLength(data, 'leaked_unheld') > 0)
        OR (kind = 'admin_request' AND agent_id IS NOT NULL)
        OR (kind = 'invalid_request' AND agent_id IS NOT NULL AND JSONExtractInt(data, 'status') IN (404, 405))
+    """,
+    # Each side-channel event with the agent's credits at that moment (the latest inventory row at or
+    # before it): could_act separates "had credits left" from "ran out" (#32).
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_offchannel_credits AS
+    SELECT o.run_id AS run_id, o.ts AS ts, o.agent AS agent, o.kind AS kind, o.level AS level,
+           i.round AS round, i.credits AS credits, i.available AS available, i.holdings AS holdings,
+           i.could_act AS could_act
+    FROM (SELECT toString(run_id) AS run_id, ts, toString(assumeNotNull(agent_id)) AS agent, kind, level
+          FROM {DATABASE}.v_offchannel WHERE agent_id IS NOT NULL) AS o
+    ASOF LEFT JOIN (SELECT toString(run_id) AS run_id, agent, ts, round, credits, available, holdings, could_act
+                    FROM {DATABASE}.v_inventory) AS i
+    ON o.run_id = i.run_id AND o.agent = i.agent AND o.ts >= i.ts
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_trace_reads AS

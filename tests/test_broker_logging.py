@@ -322,7 +322,7 @@ REJECTIONS = [
                  id="buy-before-sell"),
     pytest.param(b_selling_to_c, "b", "POST", "/offers/buy", OFF1, 403, "not_your_offer", "offer_failed",
                  id="buy-not-the-buyer"),
-    pytest.param(c_withdrew, "c", "POST", "/offers/withdraw", OFF1, 409, "offer_closed", "offer_failed",
+    pytest.param(c_withdrew, "c", "POST", "/offers/withdraw", OFF1, 409, "offer_withdrawn", "offer_failed",
                  id="withdraw-twice"),
     pytest.param(low_credits, "c", "POST", "/messages", HI_A, 402, "insufficient_credits", "message_failed",
                  id="message-insufficient-credits"),
@@ -494,3 +494,37 @@ async def test_scripted_run_logs_every_broker_action(tmp_path):
     assert exchanges and sorted(sales) == sorted((x["seller"], x["token"], x["round"]) for x in exchanges)
     assert [e["kind"] for e in market].count("round_end") == 2
     assert not any(e["kind"] == "invalid_request" for e in market)
+
+
+
+# ------------------------------------------------- attempts and generic errors (#32)
+
+def test_every_attempt_is_logged_in_one_shape_and_hidden_reasons_stay_in_the_log(market):
+    r, ev = market.call("POST", "/offers", "c", json={"token": "A1", "seller": "b"})
+    oid = r.json()["offer_id"]
+    att = one(ev, "action_attempt")["data"]
+    assert (att["action"], att["outcome"], att["reason"], att["offer_id"], att["token"], att["counterparty"]) ==         ("offer", "ok", None, oid, "A1", "b")
+    assert att["credits"] == market.broker.credits["c"] and att["available"] == market.broker.available("c")
+    # b doesn't hold A1: about the seller's own state, so it gets the specific reason
+    r, ev = market.call("POST", "/offers/sell", "b", json={"offer_id": oid})
+    assert r.json()["error"] == "seller_lacks_token"
+    att = one(ev, "action_attempt")["data"]
+    assert (att["outcome"], att["reason"], att["counterparty"]) == ("refused", "seller_lacks_token", "c")
+    # once b holds A1 but c can't pay, telling b "buyer_cannot_pay" would reveal c's credits
+    market.trade("b", "A1", "a")
+    market.broker.credits["c"] = 1
+    r, ev = market.call("POST", "/offers/sell", "b", json={"offer_id": oid})
+    assert r.status_code == 402 and r.json() == {"error": "not_completed", "message": "Not completed."}
+    assert one(ev, "action_rejected")["data"]["reason"] == "buyer_cannot_pay"
+    assert one(ev, "action_attempt")["data"]["reason"] == "buyer_cannot_pay"
+    # reads are not attempts
+    _, ev = market.call("GET", "/me", "c")
+    assert "action_attempt" not in kinds(ev)
+
+
+def test_opaque_errors_hides_every_reason_from_agents(tmp_path):
+    with running_market(tmp_path) as m:
+        m.broker.opaque_errors = True
+        r, ev = m.call("POST", "/offers", "c", json={"token": "A1", "seller": "a"})  # no edge a -> c
+        assert r.json() == {"error": "not_completed", "message": "Not completed."}
+        assert one(ev, "action_attempt")["data"]["reason"] == "no_edge"

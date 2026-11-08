@@ -135,6 +135,40 @@ def test_ship_run_events_artifacts_and_run_row(finished_run, ch):
     assert count(ch, "SELECT count() AS c FROM hivemarket.artifacts FINAL") == len(keys)
 
 
+def test_scores_actions_inventory_and_side_channel_credits_views(finished_run, ch):
+    Shipper(finished_run, ch, None).finish()
+    run = finished_run.name
+    market = [json.loads(line) for line in open(finished_run / "logs" / "market.jsonl")]
+    ends = [e["data"] for e in market if e["kind"] == "round_end"]
+    game = next(e["data"] for e in market if e["kind"] == "game_over")
+    rows = ch.query_json(f"SELECT round, level, agent, credits_spent, credits_remaining, communication_spent, offer_tax "
+                         f"FROM hivemarket.v_scores WHERE run_id = '{run}' ORDER BY level, round, agent")
+    by_round = {(r["round"], r["agent"]): r for r in rows if r["level"] == "round"}
+    for e in ends:
+        for a, s in e["per_agent"].items():
+            assert by_round[(e["round"], a)]["credits_spent"] == s["credits_spent"]
+    games = {r["agent"]: r for r in rows if r["level"] == "game"}
+    assert {a: g["credits_spent"] for a, g in games.items()} ==         {a: s["credits_spent"] for a, s in game["scores"]["per_agent"].items()}
+    assert all(r["offer_tax"] == ends[0]["config"]["offer_tax"] for r in rows)
+    rounds = ch.query_json(f"SELECT communication_spent, offer_tax, messages_enabled FROM hivemarket.v_rounds "
+                           f"WHERE run_id = '{run}' ORDER BY round")
+    assert [r["communication_spent"] for r in rounds] == [e["scores"]["communication_spent"] for e in ends]
+
+    attempts = ch.query_json(f"SELECT action, outcome FROM hivemarket.v_actions WHERE run_id = '{run}'")
+    logged = [e for e in market if e["kind"] == "action_attempt"]
+    assert len(attempts) == len(logged) > 0 and {a["action"] for a in attempts} >= {"offer"}
+
+    inv = ch.query_json(f"SELECT agent, credits, could_act FROM hivemarket.v_inventory WHERE run_id = '{run}' "
+                        f"ORDER BY seq DESC LIMIT 3")
+    last = next(e["data"] for e in reversed(market) if e["kind"] == "graph_state")
+    assert all(r["credits"] == last["credits"][r["agent"]] for r in inv)
+
+    # the rogue's direct messages, with its credits at the time (it still had them: could act)
+    side = ch.query_json(f"SELECT agent, kind, credits, could_act FROM hivemarket.v_offchannel_credits "
+                         f"WHERE run_id = '{run}' AND kind = 'tool_call'")
+    assert side and all(r["agent"] == "agent-3" and r["credits"] is not None for r in side)
+
+
 def test_graph_state_view_in_state_seq_order(finished_run, ch):
     Shipper(finished_run, ch, None).finish()
     rows = ch.query_json(f"SELECT state_seq, round, cause, credits, owners FROM hivemarket.v_graph_state "
