@@ -428,8 +428,9 @@ def test_the_session_arms_build_one_round_without_declare_stuck(name):
     assert world["rounds"]["end_on_deadlock"] is False and world["rounds"]["announce_ideal"] is False
     assert world["rules"]["messages"] is False and cfg.affordance.disclose_rule is False
     assert world["generated"]["budget_leeway"] == 0.3
-    assert cfg.memory.enabled  # main: within its session only (fresh); exploratory: carried between sessions
-    assert cfg.session == ("fresh" if name == "session_main" else "memory")
+    assert cfg.memory.enabled  # main: within its session only; exploratory: carried between sessions
+    # main: session: reflection for the post-session questionnaire (with one round it plays as fresh)
+    assert cfg.session == ("reflection" if name == "session_main" else "memory")
 
 
 @needs_generator
