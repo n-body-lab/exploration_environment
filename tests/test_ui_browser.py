@@ -121,8 +121,8 @@ async def test_page_draws_a_finished_run(run_dir):
 
             # The market's take: the last round's burned credits, and the whole run's (the round total
             # reset when round 2 started, so it is less than the run total).
-            ends = [json.loads(line)["data"] for line in (run_dir / "logs" / "market.jsonl").read_text().splitlines()
-                    if '"round_end"' in line]
+            rows = [json.loads(line) for line in (run_dir / "logs" / "market.jsonl").read_text().splitlines()]
+            ends = [r["data"] for r in rows if r["kind"] == "round_end"]  # not the notices announcing it
             burned = [e["credits_check"]["burned"] for e in ends]
             assert len(burned) >= 2 and burned[0] > 0
             box = await page.js("[...document.querySelectorAll('#market-take text')].map(t => t.textContent)")

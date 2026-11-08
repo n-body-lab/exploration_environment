@@ -133,6 +133,7 @@ test("market's take: offer tax on an offer, nothing on a plain sale, fees when t
   assert.deepStrictEqual(take(2), { offers: 1, messages: 0, fees: 0, total: 1 });   // the offer's tax
   assert.strictEqual(take(4.1).total, 1);                                           // a sale: proceeds go to the seller
   assert.deepStrictEqual(take(6), { offers: 2, messages: 0, fees: 3, total: 5 });   // + both execution fees
+  assert.strictEqual(HM.stateAt(w, m, 6).spent, 1 + 5 + 1 + 3 + 3);                 // taxes, prices, fees
   const sale = HM.stateAt(w, m, 6);  // buyer -price-fee, seller +price-fee, market +fees
   assert.strictEqual(sale.credits.z - sale.startCredits.z, -1 - 5 - 1 - 3 - 2);
   assert.strictEqual(sale.credits.x - sale.startCredits.x, 5 + 3 - 1);
@@ -153,6 +154,8 @@ test("market's take at each round end equals the credits the broker burned (cred
     assert.strictEqual(s.take.total, e.data.credits_check.burned, `round ${e.data.round}`);
     run += e.data.credits_check.burned;
     assert.strictEqual(s.runTake.total, run);
+    // "spent this round" counts everything spent, taxes and fees included, as the broker does
+    assert.strictEqual(s.spent, e.data.credits_spent, `round ${e.data.round}`);
     // and it is what's missing from the agents' credits
     const start = Object.values(world.nodes).reduce((sum, n) => sum + n.credits, 0);
     const now = Object.values(e.data.credits_remaining).reduce((sum, c) => sum + c, 0);

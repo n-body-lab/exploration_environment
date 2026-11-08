@@ -66,6 +66,7 @@
           break;
         case "offer_made":
           // The buyer pays the tax now (the graph_state row that follows agrees).
+          s.spent += d.tax || 0;
           s.credits[d.buyer] = (s.credits[d.buyer] || 0) - (d.tax || 0);
           addTake(s, "offers", d.tax || 0, e.ts);
           s.orders[d.offer_id] = { id: d.offer_id, buyer: d.buyer, seller: d.seller, token: d.token,
@@ -89,7 +90,7 @@
           // later, and runs from before graph_state existed have only this.
           // With execution fees: buyer -price-fee, seller +price-fee, market +both fees.
           const bf = d.buyer_fee || 0, sf = d.seller_fee || 0;
-          s.spent += d.cost || 0;
+          s.spent += (d.cost || 0) + bf + sf;  // everything spent, as the broker's credits_spent
           s.credits[d.buyer] = (s.credits[d.buyer] || 0) - (d.cost || 0) - bf;
           s.credits[d.seller] = (s.credits[d.seller] || 0) + (d.cost || 0) - sf;
           addTake(s, "fees", bf + sf, e.ts);
