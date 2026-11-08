@@ -48,9 +48,9 @@
       s.seq = d.seq || s.seq;
       switch (e.kind) {
         case "round_start":
-          // A new round resets credits and the round's take; the run's take carries on.
+          // A new round resets credits, the round's take and its last change; the run's take carries on.
           s = Object.assign(initialState(world), { round: d.round, phase: "active", seq: s.seq,
-                                                   runTake: s.runTake, takeLast: s.takeLast });
+                                                   runTake: s.runTake });
           break;
         case "graph_state":
           // Copies: the state is changed in place by later events, and the events are replayed
@@ -67,7 +67,7 @@
         case "offer_made":
           // The buyer pays the tax now (the graph_state row that follows agrees).
           s.spent += d.tax || 0;
-          s.credits[d.buyer] = (s.credits[d.buyer] || 0) - (d.tax || 0);
+          s.credits[d.buyer] = d.credits != null ? d.credits : (s.credits[d.buyer] || 0) - (d.tax || 0);
           addTake(s, "offers", d.tax || 0, e.ts);
           s.orders[d.offer_id] = { id: d.offer_id, buyer: d.buyer, seller: d.seller, token: d.token,
                                    price: d.price, status: "open", ts: e.ts };
@@ -91,8 +91,9 @@
           // With execution fees: buyer -price-fee, seller +price-fee, market +both fees.
           const bf = d.buyer_fee || 0, sf = d.seller_fee || 0;
           s.spent += (d.cost || 0) + bf + sf;  // everything spent, as the broker's credits_spent
-          s.credits[d.buyer] = (s.credits[d.buyer] || 0) - (d.cost || 0) - bf;
-          s.credits[d.seller] = (s.credits[d.seller] || 0) + (d.cost || 0) - sf;
+          s.credits[d.buyer] = d.buyer_credits != null ? d.buyer_credits : (s.credits[d.buyer] || 0) - (d.cost || 0) - bf;
+          s.credits[d.seller] = d.seller_credits != null ? d.seller_credits
+                                                         : (s.credits[d.seller] || 0) + (d.cost || 0) - sf;
           addTake(s, "fees", bf + sf, e.ts);
           s.holds[d.buyer] = [...new Set([...(s.holds[d.buyer] || []), d.token])].sort();
           s.known[d.buyer] = [...new Set([...(s.known[d.buyer] || []), d.token])].sort();
@@ -103,7 +104,7 @@
         }
         case "message":
           s.spent += d.cost || 0;
-          s.credits[d.sender] = (s.credits[d.sender] || 0) - (d.cost || 0);
+          s.credits[d.sender] = d.credits != null ? d.credits : (s.credits[d.sender] || 0) - (d.cost || 0);
           addTake(s, "messages", d.cost || 0, e.ts);
           break;
         case "round_end":
@@ -208,7 +209,12 @@
     const d = e.data || {};
     switch (e.kind) {
       case "http_request": return `${d.method} ${d.path}${d.query ? "?" + d.query : ""} → ${d.status} (${d.action})`;
-      case "exchange": return `${d.buyer} bought ${d.token} from ${d.seller} for ${d.cost}${d.relay ? " (relay)" : ""}`;
+      case "exchange": {
+        const fees = [d.buyer_fee ? `buyer fee ${d.buyer_fee}` : "", d.seller_fee ? `seller fee ${d.seller_fee}` : ""]
+          .filter(Boolean).join(", ");
+        return `${d.buyer} bought ${d.token} from ${d.seller} for ${d.cost}${fees ? ` (+ ${fees})` : ""}` +
+               `${d.relay ? " (relay)" : ""}`;
+      }
       case "message": return `${d.sender} → ${d.to}: ${short(d.body)}  [-${d.cost}]`;
       case "notice": return `to ${e.agent_id || "everyone"}: ${short(d.body)}`;
       case "graph_state": return `state #${d.state_seq} after ${d.cause}`;
@@ -232,7 +238,8 @@
       default:
         if (e.kind && (e.kind.startsWith("offer_") || e.kind.startsWith("sale_"))) {
           return `${e.kind.replace("_", " ")} ${d.offer_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +
-                 (d.price != null ? ` @${d.price}` : "") + (d.reason ? ` (${d.reason})` : "");
+                 (d.price != null ? ` @${d.price}` : "") + (d.tax ? `  [tax -${d.tax}]` : "") +
+                 (d.reason ? ` (${d.reason})` : "");
         }
         if (e.kind && e.kind.startsWith("order_")) {
           return `${e.kind.slice(6)} ${d.order_id || ""} ${d.buyer || ""} ← ${d.seller || ""} ${d.token || ""}` +

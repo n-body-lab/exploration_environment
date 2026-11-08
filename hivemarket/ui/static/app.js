@@ -202,14 +202,14 @@
   // to the seller). Messages and fees are listed only when the market has them. A change flashes
   // next to the title for a moment, like the change shown on a node's balance.
   const TAKE_FLASH_SECONDS = 2.5, TAKE_W = 232;
-  function marketBox(rules, st, t, now) {
+  function marketBox(rules, st, now) {
     const fee = rules.execution_fee || {};
     const parts = [["offers", "offer taxes"]];
     if (rules.messages || st.runTake.messages) parts.push(["messages", "messages"]);
     if (Object.values(fee).some(v => v) || st.runTake.fees) parts.push(["fees", "fees"]);
     const breakdown = take => parts.map(([k, label]) => `${label} ${take[k]}`).join(" · ");
     const last = st.takeLast;
-    const flash = last && last.ts <= t && now - last.ts < TAKE_FLASH_SECONDS;
+    const flash = last && now - last.ts < TAKE_FLASH_SECONDS;
     const box = el("svg:g", { id: "market-take", transform: `translate(${1000 - TAKE_W - 8},8)` });
     box.append(el("svg:rect", { width: TAKE_W, height: 84, rx: 8, class: "g-market" + (flash ? " flash" : "") }));
     const title = el("svg:text", { x: 10, y: 19, class: "g-name" }, "Market's take");
@@ -333,9 +333,8 @@
     if (st.outcome && st.phase !== "active") head += ` · ${String(st.outcome).toUpperCase()}`;
     g.append(el("svg:text", { x: 16, y: 24, class: "g-round", text: head }));
     g.append(el("svg:text", { x: 16, y: 42, class: "g-round",
-                              text: `spent this round: ${st.spent}` + (ideal != null ? ` · ideal ${ideal}` : "") +
-                                    ` · market took ${st.take.total} (run ${st.runTake.total})` }));
-    g.append(marketBox(world.rules || {}, st, t, now));
+                              text: `spent this round: ${st.spent}` + (ideal != null ? ` · ideal ${ideal}` : "") }));
+    g.prepend(marketBox(world.rules || {}, st, now));  // under the graph: nodes and edges draw over it
     $("round").textContent = head;
     const offers = Object.values(st.orders), selling = offers.filter(o => o.status === "selling" || o.status === "accepted");
     $("graph-meta").textContent = `${offers.length - selling.length} open offers · ${selling.length} sales in progress`;

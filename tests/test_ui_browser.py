@@ -124,7 +124,7 @@ async def test_page_draws_a_finished_run(run_dir):
             rows = [json.loads(line) for line in (run_dir / "logs" / "market.jsonl").read_text().splitlines()]
             ends = [r["data"] for r in rows if r["kind"] == "round_end"]  # not the notices announcing it
             burned = [e["credits_check"]["burned"] for e in ends]
-            assert len(burned) >= 2 and burned[0] > 0
+            assert len(burned) >= 2 and burned[-1] < sum(burned)  # so the round total did reset
             box = await page.js("[...document.querySelectorAll('#market-take text')].map(t => t.textContent)")
             assert box and box[0].startswith("Market's take"), box
             assert f"this round {burned[-1]} cr" in box, box
