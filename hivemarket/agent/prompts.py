@@ -159,9 +159,10 @@ def kickoff_text(status: dict[str, Any]) -> str:
 def reflection_text(cfg: AgentRuntimeConfig, notice: dict[str, Any], status: dict[str, Any] | None) -> str:
     """The round-end reflection prompt (session: reflection), from prompts/reflection.md.
 
-    `notice` is the broker's round_end notice (outcome, credits spent, the ideal, the objective);
-    `status` is the agent's own state at the end of that round, or None once the next round has
-    started (its credits and holdings are reset then).
+    `notice` is the broker's round_end notice, sent to every agent: the whole market's outcome, credits
+    spent (by kind), the ideal and the objective. `status` is the agent's current status: its
+    `last_round_result` gives its own spend for the round, and its holdings and purchases are that
+    round's until the next one starts.
     """
     objective = notice.get("objective")
     values = {
@@ -170,23 +171,31 @@ def reflection_text(cfg: AgentRuntimeConfig, notice: dict[str, Any], status: dic
         "announcement": notice.get("body", ""),
         "objective": ("communication {}, transactions {}, payments {}".format(*objective)
                       if isinstance(objective, list) and len(objective) == 3 else "not reported"),
-        "your_result": _own_result(status),
+        "your_result": _own_result(status, notice.get("round")),
         **{k: str(v) for k, v in cfg.spec.prompt_vars.items()},
     }
     return Template(cfg.reflection_template).safe_substitute(values).strip()
 
 
-def _own_result(status: dict[str, Any] | None) -> str:
-    if not status:
-        return "- Not available: the next round has already started."
-    task = ("no task" if not status.get("task") else
-            "completed" if status.get("task_completed") else "not completed")
-    bought = status.get("tokens_bought", {})
-    purchases = ", ".join(f"{token} from {b['from']} for {b['cost']}" for token, b in bought.items()) or "none"
-    spent = sum(b["cost"] for b in bought.values())
-    return "\n".join([
+def _own_result(status: dict[str, Any] | None, round_no: Any) -> str:
+    """The agent's own result for the round: all it spent, by kind, from the broker's round result."""
+    result = (status or {}).get("last_round_result")
+    if not result or result.get("round") != round_no:
+        return "- Not available."
+    task = ("no task" if not status.get("task") else "completed" if result.get("completed") else "not completed")
+    kinds = [("tokens", result.get("spent_on_tokens", 0)), ("offer taxes", result.get("spent_on_offers", 0)),
+             ("messages", result.get("spent_on_messages", 0)), ("execution fees", result.get("spent_on_fees", 0))]
+    total = sum(v for _, v in kinds)
+    breakdown = ", ".join(f"{k} {v}" for i, (k, v) in enumerate(kinds) if i < 2 or v)
+    lines = [
         f"- Your task: {task}.",
-        f"- Credits spent on tokens: {spent}; credits left: {status.get('credits')}.",
-        f"- Tokens you held at the end: {', '.join(status.get('tokens_held', {})) or 'none'}.",
-        f"- Tokens you bought: {purchases}.",
-    ])
+        f"- You spent {total} credits: {breakdown}.",
+        f"- You received {result.get('received', 0)} credits from sales; credits left: {result.get('credits_left')}.",
+        f"- Offers you made: {result.get('offers_made', 0)}; offers made to you: {result.get('offers_received', 0)}.",
+    ]
+    if status.get("round") == round_no:  # holdings and purchases are reset when the next round starts
+        bought = status.get("tokens_bought", {})
+        purchases = ", ".join(f"{t} from {b['from']} for {b['cost']}" for t, b in bought.items()) or "none"
+        lines += [f"- Tokens you held at the end: {', '.join(status.get('tokens_held', {})) or 'none'}.",
+                  f"- Tokens you bought: {purchases}."]
+    return "\n".join(lines)

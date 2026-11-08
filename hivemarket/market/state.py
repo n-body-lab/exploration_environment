@@ -455,7 +455,18 @@ class Broker:
             "communication_cost": self.comm_cost if self.messages_enabled else None,
             "token_transfer": self.token_transfer,
             "participants": self.agents,
+            "last_round_result": self._last_result(agent_id),
         }
+
+    def _last_result(self, agent_id: str) -> dict[str, Any] | None:
+        """The agent's own result in the last round that ended: what it spent, by kind, and received.
+
+        Kept through the next round, so it can still be read after that round has started.
+        """
+        if not self.results:
+            return None
+        r = self.results[-1]
+        return {"round": r["round"], "outcome": r["outcome"], **r["per_agent"][agent_id]}
 
     def graph_view(self, agent_id: str) -> dict[str, Any]:
         if agent_id not in self.spec:

@@ -228,10 +228,9 @@ class AgentRuntime:
         the conversation, so it counts toward the context budget.
         """
         status = await self._status()
-        own = status if status.get("round") == notice.get("round") else None  # reset once the next round starts
         text, usage, error = "", None, None
         try:
-            turn = await self.provider.summarize(reflection_text(self.cfg, notice, own))
+            turn = await self.provider.summarize(reflection_text(self.cfg, notice, status))
             self.steps += 1
             text, usage = (turn.text or "").strip(), turn.usage
         except Exception as e:
