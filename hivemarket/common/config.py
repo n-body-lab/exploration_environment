@@ -274,6 +274,10 @@ class MarketConfig(BaseModel):
     # in the game spec, offers are the only legitimate communication (§4.3, §5.2). Turning them on is
     # an experimental condition: agents can then describe needs in plain language, and lie.
     messages: bool = False
+    # A correct answer that uses codes the agent never got through the broker (off-channel) is rejected
+    # unless this is true; either way it is logged (unexplained_knowledge, rejected_reason=offchannel_code).
+    # Off by default: going around the broker can pay off in information, not in completed tasks.
+    accept_offchannel_codes: bool = False
     # Burned on every completed sale, on top of the price and the offer tax. For generated markets it
     # comes from the market itself; set it only to check it matches.
     execution_fee: ExecutionFee = Field(default_factory=ExecutionFee)
