@@ -20,8 +20,14 @@ maps onto ours:
   exploratory message (1 credit)     each credit of an offer's tax when the offer never leads to a sale,
                                      or a free-text message per recipient when market.messages is on
                                      (communication_cost: 1)
-  initial balances                   credits; can be 0 (such an agent can sell, unless sellers pay a fee,
-                                     but not buy or offer)
+  initial balances                   credits: the reference budget plus leeway, raised to at least
+                                     tasks.market.minimum_initial_credits (the credit floor, applied after
+                                     leeway; 0 = off). Without a floor a balance can be 0 (such an agent can
+                                     sell, unless sellers pay a fee, but not buy or offer)
+  communication_protocol             `offer_buy` (the default): one 1-credit OFFER per sale, BUY and SELL
+                                     untaxed, i.e. execution messages (1, 0). `legacy_fixed_messages` for
+                                     other counts (e.g. the goal_relevant_fragile family's seller message,
+                                     or an offer tax above 1); the protocol is always passed explicitly
 
 Everything except `reconcile` runs on the host when a run is created. The generator needs
 Python >= 3.11 and is an optional extra installed from git (`pip install -e ".[generator]"`),
@@ -44,7 +50,7 @@ from hivemarket.common.config import ExperimentConfig, GraphEdge, GraphNode, Gra
 from hivemarket.game.graph import graph_ideal, graph_to_world
 
 PACKAGE = "hivemarket-generator"
-COMMIT = "ad0fb8c0e471373d1c387ff4f8e8b726e89b8eb2"
+COMMIT = "b69351d8ee371c057514f675e26cad68485e66d7"
 SOURCE = "market_generator"
 # The generator's realised structural properties, by the groups its docs use (docs/controllability.md).
 PROPERTY_GROUPS = {
@@ -213,7 +219,8 @@ def _make_impossible(cfg: ExperimentConfig, agent_ids: list[str], market, balanc
             else:
                 prices[i] = [0 if j == i else economy + 1 for j in range(n)]
             modes.setdefault(name, []).append(spec.mode)
-    changed = g.Market(tuple(map(tuple, prices)), market.tasks, market.initial_owners, market.communication)
+    changed = g.Market(tuple(map(tuple, prices)), market.tasks, market.initial_owners, market.communication,
+                       communication_protocol=market.communication_protocol)
     return changed, tuple(credits), modes
 
 
@@ -241,7 +248,8 @@ def played_market(market, offer_tax: int):
     g = generator()
     from hivemarket_generator.models import ExecutionMessages
     return g.Market(market.prices, market.tasks, market.initial_owners,
-                    ExecutionMessages(offer_tax, market.communication.seller))
+                    ExecutionMessages(offer_tax, market.communication.seller),
+                    communication_protocol="legacy_fixed_messages")  # offer_buy is exactly (1, 0)
 
 
 def execution_fee(market, offer_tax: int) -> dict[str, int]:
@@ -286,6 +294,9 @@ def _summary(g, cfg: ExperimentConfig, result, market, balances: tuple[int, ...]
                        for group, keys in PROPERTY_GROUPS.items()},
         "fragility": {k: analysis.get(k) for k in FRAGILITY_KEYS} if analysis else None,
         "impossibility": impossibility,
+        "communication_protocol": market.communication_protocol,
+        # reference budgets, credits before and after the floor, agents the floor raised, zero-credit agents
+        "credit_allocation": meta.get("credit_allocation"),
     }
 
 

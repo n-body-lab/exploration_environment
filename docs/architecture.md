@@ -145,7 +145,7 @@ Only `/health` (the healthcheck) and FastAPI's `/openapi.json` are not logged. `
 
 ### Generated markets (market_generator)
 
-The generator (V0.3, pinned at `ad0fb8c`) makes solvable markets with controllable, measured difficulty, plus a verified reference solution. For small markets that solution is proven optimal. `hivemarket/game/generated.py` turns one into a HiveMarket game that runs under the same rules, the same benchmark and the same validation.
+The generator (V0.3 plus its OFFER/BUY protocol and credit floor, pinned at `b69351d`) makes solvable markets with controllable, measured difficulty, plus a verified reference solution. For small markets that solution is proven optimal. `hivemarket/game/generated.py` turns one into a HiveMarket game that runs under the same rules, the same benchmark and the same validation.
 
 ```yaml
 tasks:
