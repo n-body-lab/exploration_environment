@@ -469,7 +469,7 @@ class Broker:
         if not needs:
             return None
         return {"needs": needs, "separator": "-",
-                "description": f"Submit your answer: the contents of tokens {', '.join(needs)}, in that order, "
+                "description": f"Submit your answer: the codes of tokens {', '.join(needs)}, in that order, "
                                f"joined with '-'."}
 
     # ---------------------------------------------------------------- reads

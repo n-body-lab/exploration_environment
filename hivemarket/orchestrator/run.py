@@ -141,6 +141,7 @@ def create_run(experiment_path: str | Path, runs_dir: str | Path = "runs", mode:
             declare_stuck=cfg.market.declare_stuck,
             announce_ideal=cfg.rounds.announce_ideal,
             round_seconds=cfg.round_seconds,
+            rounds=cfg.rounds.count,
         )
         (run_dir / "agents" / f"{entry.id}.json").write_text(rc.model_dump_json(indent=2))
         if memory_from and mode != "docker":  # in docker the agent's monitor copies it into the memory volume

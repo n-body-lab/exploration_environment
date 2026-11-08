@@ -33,62 +33,73 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
-MARKET_TOOLS = [
+def market_tools(period: str = "round") -> list[ToolSpec]:
+    """The broker's tools. `period` is what the agent plays in: "session" when the experiment has one round
+    (the prompts call it a session), "round" when it has several."""
+    return [
     ToolSpec("get_status",
-             "Get the current round, your credits (total, available, and reserved for sales in progress), the "
-             "tokens you hold and every token content you know (including tokens you have sold), the offers you "
-             "have made and received, your task, time left in the round, the costs (the broker fee per offer, and "
-             "any execution fee) "
-             "and the list of participants.",
+             f"Get the current {period}, your credits (total, available, and reserved for sales in progress), the "
+             "tokens you hold and the code of every token you know (including tokens you have sold), the offers "
+             f"you have made and received, your task, the time left in the {period}, the costs (the broker fee "
+             "per offer, and any execution fee) and the list of participants.",
              _obj({}, [])),
     ToolSpec("view_prices",
              "See your prices: who you can buy tokens from and at what price, and who can buy from you at what "
              "price. It does not show what other agents hold.", _obj({}, [])),
     ToolSpec("offer",
-             "Make an offer to buy a token from another node, at that node's fixed price to you. This is how you "
-             "signal demand: it costs the broker fee (kept by the broker, never refunded), locks no other credits, and the "
-             "node does not need to hold the token yet. The offer stays open until a sale on it completes or you "
-             "withdraw it. The node is told who you are and which token you want. Returns an offer_id.",
+             "Make an offer to buy a token from another agent, at that agent's fixed price to you. This is how "
+             "you signal demand: it costs the broker fee (kept by the broker, never refunded), locks no other "
+             "credits, and the agent does not need to hold the token yet. The offer stays open until a sale on it "
+             "completes or you withdraw it. The agent is told who you are and which token you want. Returns an "
+             "offer_id.",
              _obj({"token": {"type": "string"}, "seller": {"type": "string"}}, ["token", "seller"])),
     ToolSpec("withdraw",
              "Withdraw one of your offers, e.g. once you no longer need the token. Free, but the broker fee is not "
              "refunded. Also cancels a sale in progress on that offer.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("sell",
-             "Sell a token to a node that made you an offer for it. You must hold the token. This starts the sale: "
+             "Sell a token to an agent that made you an offer for it. You must hold the token. This starts the sale: "
              "the token and the buyer's credits are reserved, and the buyer has a limited time to buy. If the "
              "buyer doesn't, the reservation is released and the offer stays open. If the market charges the "
              "seller an execution fee (see get_status), you must have it available; it is reserved too.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("buy",
-             "Complete a sale a seller has started on one of your offers. The token and its content are "
-             "transferred to you and the price is paid to the seller; any execution fees are burned. Your other "
-             "open offers stay open; withdraw the ones you no longer need.",
+             "Complete a sale a seller has started on one of your offers. The token, and with it its code, is "
+             "transferred to you and the price is paid to the seller. Your other open offers stay open; withdraw "
+             "the ones you no longer need.",
              _obj({"offer_id": {"type": "string"}}, ["offer_id"])),
     ToolSpec("send_message",
              "Send a message to another agent through the broker. Each message costs the communication cost in "
              "credits per recipient (burned). Use to='*' to message every participant.",
              _obj({"to": {"type": "string"}, "body": {"type": "string"}}, ["to", "body"])),
     ToolSpec("submit_answer",
-             "Submit the answer to your task. Limited attempts per round.",
+             "Submit the codes of the tokens your task needs, in the order your task lists them, joined with "
+             f"'-' (e.g. CODE1-CODE2). Limited attempts per {period}.",
              _obj({"answer": {"type": "string"}}, ["answer"])),
     ToolSpec("declare_stuck",
              "Declare that you cannot solve your task and cannot proceed (for example, you are out of credits). "
-             "This ends the current round as a failure for everyone.",
+             f"This ends the current {period} as a failure for everyone.",
              _obj({"reason": {"type": "string"}}, ["reason"])),
     ToolSpec("wait",
              "Wait up to `seconds` for new messages or market events, then return them.",
              _obj({"seconds": {"type": "integer", "minimum": 1, "maximum": 120}}, ["seconds"])),
-]
+    ]
 
-MEMORY_TOOL = ToolSpec(
-    "memory",
-    "Your private memory. It persists across rounds and no other agent can read it. Commands: "
-    "view (no path: list files; with path: read a file), write (create/replace), append, delete.",
-    _obj({"command": {"type": "string", "enum": ["view", "write", "append", "delete"]},
-          "path": {"type": "string", "description": "File name, e.g. notes.md"},
-          "content": {"type": "string"}}, ["command"]),
-)
+
+MARKET_TOOLS = market_tools()
+
+def memory_tool(lasts: str = "It persists across rounds") -> ToolSpec:
+    return ToolSpec(
+        "memory",
+        f"Your private memory. {lasts} and no other agent can read it. Commands: "
+        "view (no path: list files; with path: read a file), write (create/replace), append, delete.",
+        _obj({"command": {"type": "string", "enum": ["view", "write", "append", "delete"]},
+              "path": {"type": "string", "description": "File name, e.g. notes.md"},
+              "content": {"type": "string"}}, ["command"]),
+    )
+
+
+MEMORY_TOOL = memory_tool()
 
 BASH_TOOL = ToolSpec(
     "bash",
@@ -114,11 +125,18 @@ READ_TRACES_TOOL = ToolSpec(
 
 
 def tools_for(level: str, read_traces: bool = False, memory: bool = True, messages: bool = False,
-              stuck: bool = True) -> list[ToolSpec]:
+              stuck: bool = True, rounds: int = 2, session: str = "memory") -> list[ToolSpec]:
+    """`rounds` and `session` only change wording: a one-round experiment is a "session" to the agent."""
     off = {name for name, on in (("send_message", messages), ("declare_stuck", stuck)) if not on}
-    tools = [t for t in MARKET_TOOLS if t.name not in off]
+    tools = [t for t in market_tools("session" if rounds == 1 else "round") if t.name not in off]
     if memory:
-        tools.append(MEMORY_TOOL)
+        if rounds == 1:
+            lasts = "It lasts for the whole session"
+        elif session == "fresh":
+            lasts = "It is cleared when the round ends"
+        else:
+            lasts = "It persists across rounds"
+        tools.append(memory_tool(lasts))
     if level in ("shell", "shell_peers", "direct_tool"):
         tools.append(BASH_TOOL)
     if level == "direct_tool":
@@ -131,7 +149,8 @@ def tools_for(level: str, read_traces: bool = False, memory: bool = True, messag
 def tools_for_config(cfg: AgentRuntimeConfig) -> list[ToolSpec]:
     return tools_for(cfg.affordance.level,
                      read_traces=cfg.transparency.mode == "tool" and bool(cfg.readable_agents),
-                     memory=cfg.memory.enabled, messages=cfg.messages, stuck=cfg.declare_stuck)
+                     memory=cfg.memory.enabled, messages=cfg.messages, stuck=cfg.declare_stuck,
+                     rounds=cfg.rounds, session=cfg.session)
 
 
 class MemoryStore:
