@@ -160,6 +160,15 @@ class MemoryStore:
         text = "\n\n".join(parts)
         return text if len(text) <= max_chars else text[:max_chars] + "\n[... truncated; use the memory tool to read more]"
 
+    def clear(self) -> list[str]:
+        """Delete every memory file (a fresh session's round end); returns the names deleted."""
+        if not self.root.exists():
+            return []
+        names = sorted(p.name for p in self.root.iterdir() if p.is_file())
+        for name in names:
+            (self.root / name).unlink(missing_ok=True)
+        return names
+
     def run(self, command: str, path: str | None, content: str | None) -> tuple[str, bool]:
         try:
             self.root.mkdir(parents=True, exist_ok=True)

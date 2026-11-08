@@ -2,7 +2,8 @@
 
 How the session carries across rounds is the experiment's `session` (cfg.session):
   fresh       at each round end, wait for the next round and start a new conversation holding only
-              the system prompt and the current status (no summaries, no memory tool)
+              the system prompt and the current status (no summaries). The memory tool is off unless
+              memory.enabled is set; then it works within a round and is cleared at the round end
   memory      nothing at round end: the next round's notices arrive in the same conversation
   reflection  as memory, plus one reflection turn (tools off) when the round ends; it stays in
               the conversation
@@ -19,6 +20,7 @@ Traced events (sent to the collector):
   round_reflection    round, text, usage (session: reflection)
   context_checkpoint  summary written before a budget restart
   context_reset       a new conversation: reason new_round (fresh) | context_limit | context_overflow
+  memory_cleared      round, files: a fresh session's memory, deleted at the round end (memory on)
   runtime_stop        reason and step count
 """
 
@@ -215,6 +217,10 @@ class AgentRuntime:
             await self._reflect(notice)
             return
         # fresh: the next round starts a new conversation with nothing carried over
+        if self.cfg.memory.enabled:
+            # Logged first, so the monitor's deletions are not read as the agent deleting its own notes.
+            self.telemetry.emit("memory_cleared", round=notice.get("round", self.round_no),
+                                files=self.tools.memory.clear())
         await self._await_round_start()
         if not self.market_closed:
             self.summaries.clear()

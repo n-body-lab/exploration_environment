@@ -221,11 +221,11 @@ How each agent's session carries from one round to the next is an experimental c
 
 | `session` | Across rounds | At round end |
 |---|---|---|
-| `fresh` | A new session every round: no earlier conversation, no summaries, no `memory` tool. | The agent waits for the next round, which starts a new conversation holding only the system prompt and its current status (`context_reset`, reason `new_round`). |
+| `fresh` | A new session every round: no earlier conversation, no summaries. No `memory` tool unless `memory.enabled: true`; then it is cleared at each round end (`memory_cleared`). | The agent waits for the next round, which starts a new conversation holding only the system prompt and its current status (`context_reset`, reason `new_round`). |
 | `memory` (default) | One session for the whole experiment. The conversation continues. | Nothing extra: the next round's notices arrive in the same conversation. |
 | `reflection` | One session, as in `memory`. | One extra turn, with tools off, from `prompts/reflection.md`. It covers the broker's round-end announcement, which every agent gets (outcome, the whole market's credits spent by kind, the ideal), the round's `objective`, and the agent's own result: its task, everything it spent by kind (tokens, offer taxes, and messages and execution fees when there are any), what it received, credits left, and the tokens it held and bought. The agent's own spend comes from `last_round_result` in `get_status`, which the broker keeps until the next round ends, so it's there even if the reflection starts after the next round has. The reflection stays in the conversation and is traced as `round_reflection` (`round`, `text`). |
 
-- **Conflicts.** `session: fresh` turns the `memory` tool off, so `memory.enabled: true` alongside it is rejected. The former `context.reset_each_round` is rejected too, with a pointer to `session`.
+- **Conflicts.** `session: fresh` turns the `memory` tool off unless `memory.enabled: true` is set (notes within a round, cleared at its end). `memory.carry_results` alongside it is rejected, and so is `--memory-from`: a fresh session is a new team. The former `context.reset_each_round` is rejected too, with a pointer to `session`.
 - **Workspace.** `fresh` does not wipe the agent's workspace. With a shell affordance, files it wrote in earlier rounds stay. The monitor would record a wipe as the agent deleting its own files, which would confuse the file analysis. Every write is versioned anyway, so cross-round file use is visible.
 - **Budgets.** A reflection is part of the conversation, so it counts toward the context budget below. The runtime asks for it, so it doesn't count toward the per-round step limit.
 - **Observability.** The mode is in every agent's `runtime_start` (`session`), in `summary.json` with per-agent `reflections`, `round_resets` and `context_restarts`, and in `summary.md` with their totals. In the warehouse it is in `v_agent_sessions`, with reflections in `v_reflections`. Reflections are also text units in the analysis corpus and lines in the Observer UI.
@@ -250,7 +250,7 @@ Agents are told this happens. Every checkpoint and restart is traced (`context_c
 
 ### Chained sessions (`--memory-from`, `hivemarket chain`)
 
-One team can play several markets in a row, each a run of its own, with each agent's memory carried from run to run: `hivemarket run b.yaml --memory-from runs/<a>` (also `local` and `init`), or `hivemarket chain a.yaml b.yaml c.yaml` (`--local` for in-process). Every file must have the same team (agent ids, providers and models) and memory on (not `session: fresh`); change the market, e.g. its `seed`.
+One team can play several markets in a row, each a run of its own, with each agent's memory carried from run to run: `hivemarket run b.yaml --memory-from runs/<a>` (also `local` and `init`), or `hivemarket chain a.yaml b.yaml c.yaml` (`--local` for in-process). Every file must have the same team (agent ids, providers and models) and memory on (not `session: fresh`, which is a new team each session); change the market, e.g. its `seed`.
 
 - **What carries.** Each agent's memory files at the end of the previous run (from `memory_final.tar.gz` in Docker runs, `artifacts/<agent>/memory/` in local ones). Nothing else: not the conversation, workspace or summaries.
 - **Its own result** (`memory.carry_results: true`): `previous_session.md` in the agent's memory, with its own result in the previous run's last round from the broker's `per_agent` entry: whether it completed its task, credits at the start, credits spent (tokens, broker fees: offer taxes plus execution fees), received and left. Never the ideal, the objective or other agents' results.
@@ -259,7 +259,7 @@ One team can play several markets in a row, each a run of its own, with each age
 
 ### Private memory
 
-Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds, except under `session: fresh`.
+Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds, except under `session: fresh`: there it is off by default, and with `memory.enabled: true` it lasts one round.
 
 - **Hidden from other agents.** The memory is on the agent's own volume (`mem-<agent>`), and the transparency feature always filters out memory calls and results, whatever `expose` says. One leak path remains: if an agent reasons about its memory and reasoning is exposed, readers see that reasoning.
 - **Fully visible to observers.** Every operation is a traced tool call (`v_memory`). The monitor versions every memory file (`artifacts/<agent>/memory_versions/`, `memory_final.tar.gz`), and the gateway logs the full context of every model call.

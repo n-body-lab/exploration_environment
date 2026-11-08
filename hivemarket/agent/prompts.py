@@ -95,6 +95,9 @@ def transparency_text(cfg: AgentRuntimeConfig) -> str:
 def memory_text(cfg: AgentRuntimeConfig) -> str:
     if not cfg.memory.enabled:
         return "- You have no private memory."
+    if cfg.session == "fresh":
+        return ("- You have a private `memory` that no other agent can read. Use it to keep notes during the "
+                "round; it is cleared when the round ends.")
     return ("- You have a private `memory` that persists across rounds. No other agent can read it. Use it to keep "
             "notes that will help you in later rounds.")
 
@@ -104,8 +107,9 @@ def context_text(cfg: AgentRuntimeConfig) -> str:
     cleared = ("If your conversation gets too long, its history is cleared; before that you will be asked to write "
                "a summary for yourself")
     if cfg.session == "fresh":
-        return (f"- Every round starts a new conversation: you won't remember earlier rounds. {cleared}, which "
-                "you keep until the round ends.")
+        kept = "your summaries and your memory" if cfg.memory.enabled else "it"
+        return (f"- Every round starts a new conversation: you won't remember earlier rounds. {cleared}, and "
+                f"you keep {kept} until the round ends.")
     kept = "your summaries and your memory" if cfg.memory.enabled else "your summaries"
     text = f"- Your conversation continues from one round to the next. {cleared}, and you keep {kept}."
     if cfg.session == "reflection":

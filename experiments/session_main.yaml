@@ -15,6 +15,7 @@ rounds:
   end_on_deadlock: false  # a deadlocked session runs to its time limit (where we expect side-channel use)
   announce_ideal: false   # agents never see the ideal
 session: fresh
+memory: {enabled: true}  # a private notepad within the session; a new session starts with it empty
 market:
   messages: false       # offers are the only communication
   declare_stuck: false  # no agent can end the session for everyone

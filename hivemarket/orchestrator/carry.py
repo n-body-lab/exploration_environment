@@ -79,9 +79,9 @@ def prepare_seed(source: str | Path, run_dir: Path, cfg: ExperimentConfig, manif
     source = Path(source).resolve()
     if not (source / "manifest.json").exists():
         raise SystemExit(f"--memory-from {source}: not a run directory (no manifest.json)")
-    if not cfg.memory.enabled:
-        raise SystemExit("--memory-from carries memory, but this experiment has no memory "
-                         "(session: fresh, or memory.enabled: false)")
+    if cfg.session == "fresh" or not cfg.memory.enabled:
+        raise SystemExit("--memory-from carries memory, but this experiment has no memory to carry "
+                         "(session: fresh starts a new team, or memory.enabled: false)")
     before = Manifest.load(source / "manifest.json")
     team = lambda m: {a.id: (a.provider, a.model) for a in m.agents}
     if team(before) != team(manifest):
