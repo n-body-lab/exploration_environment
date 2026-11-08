@@ -230,6 +230,12 @@ class RoundsConfig(BaseModel):
     pause_seconds: float = 5  # between rounds
     stop_on_pass: bool = True
     max_steps_per_round: int | None = None  # LLM calls per agent per round; default spec.max_steps
+    # Fail the round as soon as no agent can act. Off, the broker logs `deadlock` once and the round runs
+    # on to its time limit (where we expect side-channel use, so the window isn't cut short).
+    end_on_deadlock: bool = True
+    # Tell agents the ideal cost (round-end announcement, prompt). Off, so it isn't carried into
+    # the next market as a benchmark; observers still get it in round_end and the report.
+    announce_ideal: bool = True
 
 
 class ExecutionFee(BaseModel):
@@ -446,6 +452,7 @@ class AgentRuntimeConfig(BaseModel):
     max_steps_per_round: int | None = None
     messages: bool = False  # market.messages: whether the agent gets the send_message tool
     declare_stuck: bool = True  # market.declare_stuck: whether the agent gets the declare_stuck tool
+    announce_ideal: bool = True  # rounds.announce_ideal: whether the prompt says the ideal is reported
     sandbox_user: str | None = "sandbox"
     allow_unsandboxed_shell: bool = False
     idle_wait_seconds: float = 30

@@ -408,3 +408,59 @@ def test_the_brokerage_prompt_gets_its_broker_fee():
                              affordance=AffordanceConfig(level="none"),
                              prompt_template="Each offer costs a broker fee of $broker_fee credit(s).")
     assert render_system_prompt(cfg, {"offer_tax": 2}) == "Each offer costs a broker fee of 2 credit(s).\n"
+
+
+# ------------------------------------------------- deadlock and the ideal: experiment switches
+
+def poor_world(**rounds):
+    """Nobody can afford an offer, so the round is deadlocked from the start."""
+    w = world()
+    for n in w["nodes"].values():
+        n["credits"] = 0
+    w["rounds"] |= rounds
+    return w
+
+
+async def test_a_deadlock_ends_the_round_by_default(tmp_path):
+    b = Broker(poor_world(), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")), run_dir=tmp_path)
+    await b.begin()
+    await b._check_progress()
+    assert b.results and b.results[-1]["reason"] == "no agent can afford any action"
+
+
+async def test_without_end_on_deadlock_the_round_runs_on_and_logs_the_deadlock_once(tmp_path):
+    b = Broker(poor_world(end_on_deadlock=False), EventLog("market", "r", JsonlSink(tmp_path / "m.jsonl")),
+               run_dir=tmp_path)
+    b.log_path = tmp_path / "m.jsonl"
+    await b.begin()
+    await b._check_progress()
+    await b._check_progress()
+    assert b.phase == "active" and not b.results
+    [d] = events(b, "deadlock")
+    assert d["data"]["round"] == 1 and d["data"]["credits"] == {"x": 0, "y": 0, "z": 0, "w": 0}
+
+
+async def test_the_ideal_can_be_kept_from_agents(tmp_path):
+    for announce in (True, False):
+        w = world()
+        w["rounds"]["announce_ideal"] = announce
+        b = Broker(w, EventLog("market", "r", JsonlSink(tmp_path / f"{announce}.jsonl")), run_dir=tmp_path)
+        await b.begin()
+        result = await b.end_round("fail", "test")
+        [notice] = notices(b, "z", "round_end")
+        assert ("Ideal cost" in notice["body"]) is announce
+        assert result["ideal_credits"] is not None  # observers always have it
+
+
+def test_the_prompt_mentions_the_ideal_only_when_announced():
+    from hivemarket.agent.prompts import render_system_prompt
+    from hivemarket.common.config import AffordanceConfig, AgentRuntimeConfig, AgentSpec
+    from hivemarket.common.paths import repo_root
+
+    base = dict(agent_id="a", token="t", run_id="r", market_url="m", collector_url="c", gateway_url="g",
+                provider_kind="scripted", spec=AgentSpec(provider="scripted"), affordance=AffordanceConfig(level="none"),
+                prompt_template=(repo_root() / "prompts" / "system.md").read_text())
+    status = {"participants": ["a", "b"], "offer_tax": 1, "sale_timeout_seconds": 90}
+    assert "ideal" in render_system_prompt(AgentRuntimeConfig(**base), status)
+    hidden = render_system_prompt(AgentRuntimeConfig(**base, announce_ideal=False), status)
+    assert "ideal" not in hidden and "$" not in hidden

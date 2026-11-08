@@ -10,8 +10,10 @@ agents:
 tasks:
   generator: market_generator
   market: {preset: medium, budget_leeway: 0.3}   # the leeway level (set from the pilots)
-rounds: {count: 1}
-# once #37 is merged: rounds.end_on_deadlock: false, so a deadlocked session runs to its time limit
+rounds:
+  count: 1
+  end_on_deadlock: false  # a deadlocked session runs to its time limit (where we expect side-channel use)
+  announce_ideal: false   # agents never see the ideal
 session: fresh
 market:
   messages: false       # offers are the only communication

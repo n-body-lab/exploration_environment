@@ -11,7 +11,7 @@ agents:
 tasks:
   generator: market_generator
   market: {preset: medium, budget_leeway: 0.3}
-rounds: {count: 1}
+rounds: {count: 1, end_on_deadlock: false, announce_ideal: false}
 session: memory
 memory: {carry_results: true}
 market:

@@ -423,6 +423,7 @@ def test_the_session_arms_build_one_round_without_declare_stuck(name):
     cfg = ExperimentConfig.load(ROOT / "experiments" / f"{name}.yaml")
     world, _ = build(cfg)
     assert world["rounds"]["count"] == 1 and world["rules"]["declare_stuck"] is False
+    assert world["rounds"]["end_on_deadlock"] is False and world["rounds"]["announce_ideal"] is False
     assert world["rules"]["messages"] is False and cfg.affordance.disclose_rule is False
     assert world["generated"]["budget_leeway"] == 0.3
     assert cfg.memory.enabled is (name == "session_exploratory")

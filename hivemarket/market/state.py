@@ -101,6 +101,9 @@ class Broker:
         self.round_seconds = float(r.get("round_seconds") or 900)
         self.pause_seconds = float(r.get("pause_seconds", 5))
         self.stop_on_pass = bool(r.get("stop_on_pass", True))
+        self.end_on_deadlock = bool(r.get("end_on_deadlock", True))
+        self.announce_ideal = bool(r.get("announce_ideal", True))
+        self.deadlocked = False  # this round; logged once when end_on_deadlock is off
         rules = world.get("rules", {})
         self.visibility = rules.get("graph_visibility", "neighbors")
         self.allow_broadcast = rules.get("allow_broadcast", True)
@@ -161,6 +164,7 @@ class Broker:
 
     async def _start_round(self, n: int) -> None:
         self._reset_round_state()
+        self.deadlocked = False
         self.round_no = n
         self.phase = "active"
         self.contents = token_contents(self.graph, self.seed, n)
@@ -293,7 +297,9 @@ class Broker:
         fees_txt = f", execution fees {spent['fees']}" if any(self.fee.values()) else ""
         body = (f"Round {self.round_no} of {self.rounds_total} is over: {outcome.upper()} ({reason}). "
                 f"Credits spent this round: {spent['total']} (tokens {spent['exchanges']}, offers "
-                f"{spent['offers']}, messages {spent['messages']}{fees_txt}). Ideal cost to solve: {self._ideal_text()}.")
+                f"{spent['offers']}, messages {spent['messages']}{fees_txt}).")
+        if self.announce_ideal:
+            body += f" Ideal cost to solve: {self._ideal_text()}."
         if last:
             await self._publish("*", body + " The game is over.", event="round_end", round=self.round_no,
                                 outcome=outcome, objective=result["objective"])
@@ -338,7 +344,13 @@ class Broker:
             return  # a sale is pending, or an open offer could still be sold: not a deadlock
         costs = [c for c in (self.offer_tax, self.comm_cost if self.messages_enabled else 0) if c > 0]
         if costs and all(self.available(n) < min(costs) for n in self.agents):
-            await self._end_round("fail", "no agent can afford any action")
+            if self.end_on_deadlock:
+                await self._end_round("fail", "no agent can afford any action")
+            elif not self.deadlocked:  # the round runs on to its time limit; mark when it got stuck
+                self.deadlocked = True
+                self.log.emit("deadlock", round=self.round_no, credits=dict(self.credits),
+                              completed=sorted(self.completed))
+                self._record_state("deadlock", None)
 
     def _sellable(self, o: dict[str, Any]) -> bool:
         """A pending sale, or an open offer its seller could SELL right now."""

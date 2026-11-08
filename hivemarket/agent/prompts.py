@@ -147,6 +147,7 @@ def render_system_prompt(cfg: AgentRuntimeConfig, status: dict[str, Any]) -> str
         "offer_tax": status.get("offer_tax", 1),
         "broker_fee": status.get("offer_tax", 1),  # the offer tax, under the brokerage prompt's name
         "stuck_note": stuck_text(cfg),
+        "ideal_note": " and the ideal number of credits" if cfg.announce_ideal else "",
         "sale_timeout": int(status.get("sale_timeout_seconds", 90)),
         "execution_fee_note": execution_fee_text(status.get("execution_fee")),
         "token_transfer_note": TOKEN_TRANSFER_NOTE.get(status.get("token_transfer", "move"), TOKEN_TRANSFER_NOTE["move"]),
