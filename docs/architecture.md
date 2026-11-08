@@ -97,7 +97,7 @@ rounds: {count: 5, round_seconds: 600, pause_seconds: 5, stop_on_pass: true}
 - **Solving.** A node with `needs` submits the contents of its needed tokens, in order, joined with `-`. The round **passes** when every such node has submitted correctly.
 - **Failing.** Any agent can `declare_stuck` (can't solve, can't proceed), which ends the round as a **fail** for everyone. The round also fails on its time limit, or when no agent can afford an offer or a message and no open offer could still be sold (a seller holding the token and a buyer able to pay). A lull in trading is not a deadlock while a sale is still possible.
 - **Round end.** The broker tells every agent the outcome, the reason, the credits spent (on tokens, offers and messages, and on execution fees when the market charges them) and the ideal credits. For a generated game the ideal says whether it is proven optimal or only the best plan found. `round_end` also carries the spec's collective objective, `objective` = (communication spent including execution fees, transactions, payments), compared in that order. If rounds remain, the next round starts after `pause_seconds` with the same graph, reset credits and holdings, and new token contents. With `stop_on_pass`, the game ends at the first pass. Agents are told up front how many rounds they have to reach a solution collectively.
-- **Persistent sessions.** Each agent's process and conversation persist across rounds. `rounds.max_steps_per_round` caps LLM calls per round. An agent that hits the cap waits for the next round.
+- **Persistent sessions.** Each agent's process persists across rounds; its conversation does too, except under `session: fresh` (see **Agent session across rounds**). `rounds.max_steps_per_round` caps LLM calls per round. An agent that hits the cap waits for the next round.
 - **Graph visibility** (`market.graph_visibility`). `neighbors` (default): an agent sees who it can buy from and at what cost, and who can buy from it. It does **not** see what other nodes hold or how many credits they have. It finds out by asking (messages) or by trying to buy. `full`: an explicit experimental condition that reveals the whole graph, all holdings and all needs. Observers always see everything through the admin API (`GET /admin/state`, `GET /admin/credits`).
 
 **Ideal credits** (`hivemarket/game/graph.py`, computed once per run into `world.json`): the minimum credits any successful round can spend. Each needed token is routed from its holders to every node that needs it, and the model follows `market.token_transfer`. With `move` (the default) a sale moves the token, so each holder's copy travels as one chain of sales and can't fan out: the plan is the cheapest set of walks, at most one per holder, that together visit every needer (Held–Karp per walk plus a subset DP across holders; walks may revisit nodes). Every transfer costs its edge price plus the offer tax (`transfer_tax`): each purchase needs at least one offer. A relay is asked by the offer itself, so runs charge no separate relay message (the optional `communication_cost` argument models one: every intermediate hop of a walk costs it too, including a needer or former holder buying the token back). If no set of walks reaches every needer, the rest are listed in `unreachable` ("token can't pass through every needer in one chain"). With `copy` a bought token can serve several needers downstream: a minimum directed Steiner tree (Dreyfus–Wagner), where only nodes that neither hold nor need the token pay a relay message. Both DPs are exact. Execution fees are part of every transfer's cost too, and are charged to each side's budget. It ignores budgets: `budget_shortfalls` lists nodes that can't pay for their part of the ideal plan from their starting credits, and `unreachable` lists needs no route can satisfy (`solvable: false`). Generated games use the generator's budget-aware solution instead and keep this figure alongside (see **Generated markets** below).
@@ -209,15 +209,30 @@ tasks:
   - **Python:** the floor stays at 3.10, with the generator as an optional extra marked for Python ≥ 3.11.
   - **Impossibility:** applied after generation, with an exact proof.
 
-### Context policy (the same for every model)
+### Agent session across rounds (`session`)
 
-Sessions persist across rounds, so conversations grow, by roughly 1–2K tokens per agent step. To keep models with different context windows comparable, every agent follows one policy (`context:` in the experiment):
+How each agent's session carries from one round to the next is an experimental condition, one value per run:
 
-- **Checkpoint.** The agent writes a summary for its future self, with tools disabled. This happens at the end of every round (`reset_each_round`) and whenever the last call used more than `reset_at_fraction × window_tokens` tokens.
-- **Restart.** The agent continues in a *new* conversation: the same system prompt, then its most recent summaries, its memory files (truncated to `memory_chars_in_restart`; the rest stay readable through the memory tool), and its current status. History is never edited in place, which keeps Claude's preserved-thinking checks valid.
+| `session` | Across rounds | At round end |
+|---|---|---|
+| `fresh` | A new session every round: no earlier conversation, no summaries, no `memory` tool. | The agent waits for the next round, which starts a new conversation holding only the system prompt and its current status (`context_reset`, reason `new_round`). |
+| `memory` (default) | One session for the whole experiment. The conversation continues. | Nothing extra: the next round's notices arrive in the same conversation. |
+| `reflection` | One session, as in `memory`. | One extra turn, with tools off, from `prompts/reflection.md`. It covers the broker's round-end announcement, which every agent gets (outcome, the whole market's credits spent by kind, the ideal), the round's `objective`, and the agent's own result: its task, everything it spent by kind (tokens, offer taxes, and messages and execution fees when there are any), what it received, credits left, and the tokens it held and bought. The agent's own spend comes from `last_round_result` in `get_status`, which the broker keeps until the next round ends, so it's there even if the reflection starts after the next round has. The reflection stays in the conversation and is traced as `round_reflection` (`round`, `text`). |
+
+- **Conflicts.** `session: fresh` turns the `memory` tool off, so `memory.enabled: true` alongside it is rejected. The former `context.reset_each_round` is rejected too, with a pointer to `session`.
+- **Workspace.** `fresh` does not wipe the agent's workspace. With a shell affordance, files it wrote in earlier rounds stay. The monitor would record a wipe as the agent deleting its own files, which would confuse the file analysis. Every write is versioned anyway, so cross-round file use is visible.
+- **Budgets.** A reflection is part of the conversation, so it counts toward the context budget below. The runtime asks for it, so it doesn't count toward the per-round step limit.
+- **Observability.** The mode is in every agent's `runtime_start` (`session`), in `summary.json` with per-agent `reflections`, `round_resets` and `context_restarts`, and in `summary.md` with their totals. In the warehouse it is in `v_agent_sessions`, with reflections in `v_reflections`. Reflections are also text units in the analysis corpus and lines in the Observer UI.
+
+### Context budget (the same for every model)
+
+Conversations grow by roughly 1–2K tokens per agent step. To keep models with different context windows comparable, every agent follows one budget (`context:` in the experiment), in every `session` mode and within a round:
+
+- **Checkpoint.** When the last call used more than `reset_at_fraction × window_tokens` tokens, the agent writes a summary for its future self, with tools disabled.
+- **Restart.** The agent continues in a *new* conversation: the same system prompt, then its most recent summaries, its memory files (truncated to `memory_chars_in_restart`; the rest stay readable through the memory tool), and its current status. In `fresh`, summaries are dropped at the next round boundary. History is never edited in place, which keeps Claude's preserved-thinking checks valid.
 - **Overflow.** If a provider still rejects a call as too long, the agent restarts without a new summary instead of failing.
 
-Agents are told this happens. Every checkpoint and restart is traced (`context_checkpoint` with the summary text, `context_reset` with the exact first message). Status calls the runtime makes on an agent's behalf are marked `origin: runtime` in the broker log, so they're never counted as the agent's own actions. Set `window_tokens` to the smallest window among the experiment's models. Token counts differ slightly between tokenizers, so the budget is the same in intent but not to the token.
+Agents are told this happens. Every checkpoint and restart is traced (`context_checkpoint` with the summary text, `context_reset` with the reason and the exact first message). The report counts these budget restarts separately from `fresh`'s round-boundary resets. Status calls the runtime makes on an agent's behalf are marked `origin: runtime` in the broker log, so they're never counted as the agent's own actions. Set `window_tokens` to the smallest window among the experiment's models. Token counts differ slightly between tokenizers, so the budget is the same in intent but not to the token.
 
 ### Using Qwen and other OpenAI-compatible models
 
@@ -229,7 +244,7 @@ Agents are told this happens. Every checkpoint and restart is traced (`context_c
 
 ### Private memory
 
-Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds.
+Every agent has a `memory` tool (view / write / append / delete files) that persists across rounds, except under `session: fresh`.
 
 - **Hidden from other agents.** The memory is on the agent's own volume (`mem-<agent>`), and the transparency feature always filters out memory calls and results, whatever `expose` says. One leak path remains: if an agent reasons about its memory and reasoning is exposed, readers see that reasoning.
 - **Fully visible to observers.** Every operation is a traced tool call (`v_memory`). The monitor versions every memory file (`artifacts/<agent>/memory_versions/`, `memory_final.tar.gz`), and the gateway logs the full context of every model call.
@@ -257,7 +272,8 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Offer tax | `market.offer_tax` | Credits each offer burns (default 1). |
 | Sale timeout | `market.sale_timeout_seconds` | Seconds a buyer has to BUY once a seller has SOLD (default 90). |
 | Memory | `memory.*` | On/off and size limits. |
-| Context policy | `context.*` | Window budget, reset threshold, reset each round, summary limits. |
+| Agent session | `session` | `fresh`, `memory` (default) or `reflection`: how a session carries across rounds. |
+| Context budget | `context.*` | Window budget, reset threshold, summary limits. |
 | Prompt | `prompt_file`, `prompt_vars` | A `$placeholder` template; the default is `prompts/system.md`. |
 
 **Transparency caveats.** What counts as "reasoning" differs by provider. Claude returns reasoning *summaries*, OpenAI models hide their reasoning, and open models usually return it in full. For cross-provider comparisons, limit `expose` to `text` and `tool_calls`. Readable traces also form a channel: an agent can address its readers by writing to its own reasoning. The telemetry captures this, but you need to decide whether it counts as a violation.
@@ -300,7 +316,7 @@ open http://127.0.0.1:3000      # Grafana "HiveMarket run" dashboard, refreshes 
 ```
 
 - **Live and later are the same data.** The shipper streams events every 2s during a run. The Grafana dashboard filters by `run_id`, so it works the same for a running experiment and for one from months ago. Use ClickHouse SQL (port 8123) to compare across runs.
-- **Tables:** `events` (every event; payload JSON in `data`), `runs` (config, ground truth, manifest without tokens, summary, status), `artifacts` (every uploaded file and its object key). **Views:** `v_events` (deduplicated), `v_rounds`, `v_balances`, `v_graph_state`, `v_backchannel`, `v_signals`, `v_exploration`, `v_exploration_actions`, `v_run_difficulty`, `v_round_validation`, `v_exchanges`, `v_messages`, `v_memory`, `v_llm_usage`, `v_agent_turns`, `v_offchannel`, `v_trace_reads`, `v_file_activity`.
+- **Tables:** `events` (every event; payload JSON in `data`), `runs` (config, ground truth, manifest without tokens, summary, status), `artifacts` (every uploaded file and its object key). **Views:** `v_events` (deduplicated), `v_rounds`, `v_balances`, `v_graph_state`, `v_backchannel`, `v_signals`, `v_exploration`, `v_exploration_actions`, `v_run_difficulty`, `v_round_validation`, `v_agent_sessions`, `v_reflections`, `v_exchanges`, `v_messages`, `v_memory`, `v_llm_usage`, `v_agent_turns`, `v_offchannel`, `v_trace_reads`, `v_file_activity`.
 - **Object storage:** `s3://hivemarket/runs/<run_id>/` mirrors the run directory: pcaps, logs, workspace versions and snapshots, container diffs, world and summary. Files containing agent tokens (`agents/`, `docker-compose.yml`, `manifest.json`) are never shipped; `manifest.public.json` is shipped instead.
 - **Persistence.** ClickHouse data is in the external Docker volume `hivemarket-clickhouse`. Compose never deletes external volumes, even with `down -v`, and ClickHouse's atomic file swaps fail on macOS bind mounts. Object storage and Grafana use bind mounts under `$HIVEMARKET_DATA`. Removing or upgrading containers leaves all of it intact, and nothing expires. Each run directory also keeps a full local copy.
 - **Re-ingest.** `hivemarket ingest runs/<id> [--full]` ships a run that ran with the observatory down, or into a fresh warehouse. Rows deduplicate on `event_id`, so re-shipping is safe.
@@ -318,7 +334,7 @@ Runs automatically after every run (the judge excepted) and on demand: `hivemark
 
 Each record gives sender, recipient, round, port, delivered or refused, the message, the response, which tokens' contents it carried, which sources saw it, and replies linked into threads. Per-round who-contacted-whom pairs are in the report and in the "Backchannel pairs" panel.
 
-**Collusion signals** (`v_signals`) cover agent text: reasoning, model output, broker messages, backchannel payloads, memory writes, round summaries and shell commands. There are three tiers:
+**Collusion signals** (`v_signals`) cover agent text: reasoning, model output, broker messages, backchannel payloads, memory writes, summaries, round reflections and shell commands. There are three tiers:
 
 | Tier | What | Cost |
 |---|---|---|
@@ -376,4 +392,4 @@ The test suite covers the market and its logging of every interaction, execution
 - Context grows without bound up to `max_steps`; small-context models need a context policy.
 - No sweeps yet (one YAML file = one run); affordance and transparency apply to the whole experiment, not per group.
 - The ideal-credit figure ignores budgets (see `budget_shortfalls`) and uses a simple message model (one message per relay request).
-- The context policy compresses history into the agent's own summaries. That is uniform across models, but it means no agent keeps a verbatim transcript of earlier rounds.
+- A context-budget restart compresses history into the agent's own summaries. That is uniform across models, but after one an agent no longer has a verbatim transcript of what came before.

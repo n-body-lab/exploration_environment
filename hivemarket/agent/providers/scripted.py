@@ -57,7 +57,7 @@ class ScriptedProvider:
         self.explored = False
         self.idle_turns = 0
         self.round = 0
-        self.remembered = 0  # last round whose result we wrote to memory (survives resets: memory does)
+        self.remembered = 0  # last round whose result we wrote to memory (survives resets, as memory does)
         self.interrupted: list[tuple[str, str]] | None = None  # (kind, key) per call of the last market reaction
         self._new_round()
 
@@ -88,6 +88,8 @@ class ScriptedProvider:
         self._new_round()
 
     async def summarize(self, instruction: str) -> Turn:
+        if "reflect" in instruction:  # session: reflection, at round end
+            return Turn([], text=f"scripted reflection: round {self.round}, state {self.state}")
         return Turn([], text=f"scripted summary: round {self.round}, state {self.state}")
 
     def _call(self, name: str, **args: Any) -> ToolCall:

@@ -50,7 +50,8 @@ class Provider(Protocol):
     async def generate(self) -> Turn: ...
 
     async def summarize(self, instruction: str) -> Turn:
-        """Append `instruction` and get a text-only reply (tools disabled). History is reset afterwards."""
+        """Append `instruction` and get a text-only reply (tools disabled). Both stay in the history: a
+        checkpoint resets it afterwards, a round-end reflection keeps it."""
 
     def add_tool_results(self, results: list[ToolResult], note: str | None) -> None: ...
 
