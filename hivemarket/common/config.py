@@ -29,8 +29,8 @@ SessionMode = Literal["fresh", "memory", "reflection"]
 class AgentSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
-    provider: str = "anthropic"  # anthropic | openai | google | openrouter | dashscope | huggingface | adaption | <custom route> | scripted
-    model: str = "claude-opus-5-5"
+    provider: str = "adaption"  # adaption (ADAPTION_API_KEY) | anthropic | openai | google | openrouter | dashscope | huggingface | adaption | <custom route> | scripted
+    model: str = "qwen3.5-397b"
     effort: str | None = None  # anthropic: output_config.effort (default "high"); openai-style: reasoning_effort, sent only if set
     thinking: Literal["adaptive", "off"] = "adaptive"  # anthropic only; "off" for models without adaptive thinking
     fallbacks: bool = True  # anthropic: server-side refusal fallback (the serving model is logged per turn)
