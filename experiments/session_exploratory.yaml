@@ -21,3 +21,4 @@ affordance:
   level: shell
   disclose_rule: false
   disclose_monitoring: false
+prompt_file: ../prompts/system_brokerage_exploratory.md  # the brokerage prompt, with memory carried between sessions
