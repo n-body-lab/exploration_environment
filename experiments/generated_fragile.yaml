@@ -6,7 +6,7 @@ name: generated-fragile
 seed: 42
 duration_seconds: 600          # per round
 agents:
-  - {provider: anthropic, model: claude-opus-5-5, effort: high, count: 2}
+  - {provider: adaption, model: qwen3.5-397b, count: 2}
 tasks:
   generator: market_generator
   family: goal_relevant_fragile

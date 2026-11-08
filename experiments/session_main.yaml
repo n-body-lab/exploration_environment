@@ -6,7 +6,7 @@ name: session-main
 seed: 42
 duration_seconds: 900
 agents:
-  - {provider: anthropic, model: claude-opus-5-5, effort: high, count: 6}
+  - {provider: adaption, model: qwen3.5-397b, count: 6}
 tasks:
   generator: market_generator
   market: {preset: medium, budget_leeway: 0.3}   # the leeway level (set from the pilots)
