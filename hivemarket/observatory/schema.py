@@ -10,7 +10,8 @@ events     one row per event from every source, the common envelope; `data` is t
 runs       one row per run: config, ground truth, manifest (tokens removed), summary, status.
            For market_generator games `world` carries the generator's difficulty (v_run_difficulty).
 artifacts  every file uploaded to object storage (pcaps, workspace versions, snapshots, logs).
-analysis   outputs of `hivemarket analyze` (backchannel, signal, exploration_action, exploration_summary);
+analysis   outputs of `hivemarket analyze` (backchannel, signal, exploration_action, exploration_summary,
+           former_holder);
            replaced wholesale whenever a run is re-analysed.
 embeddings one vector per agent text unit; search with cosineDistance(vector, ...).
 v_*        convenience views; summary.md from `hivemarket report` remains the reference analysis.
@@ -189,6 +190,25 @@ STATEMENTS = [
     FROM {DATABASE}.events FINAL
     ARRAY JOIN JSONExtractKeysAndValues(data, 'credits', 'Int64') AS kv
     WHERE source = 'market' AND kind = 'balances'
+    """,
+    # One row per graph_state snapshot (whole market state after each change), in causal order:
+    # state_seq, not ts, since two changes can share a timestamp.
+    f"""
+    CREATE OR REPLACE VIEW {DATABASE}.v_graph_state AS
+    SELECT run_id, ts,
+           JSONExtractUInt(data, 'state_seq') AS state_seq,
+           JSONExtractUInt(data, 'round') AS round,
+           JSONExtractString(data, 'phase') AS phase,
+           JSONExtractString(data, 'cause') AS cause,
+           agent_id,
+           JSONExtractInt(data, 'total_credits') AS total_credits,
+           JSONExtract(data, 'credits', 'Map(String, Int64)') AS credits,
+           JSONExtract(data, 'holdings', 'Map(String, Array(String))') AS holdings,
+           JSONExtract(data, 'owners', 'Map(String, Array(String))') AS owners,
+           JSONExtract(data, 'known', 'Map(String, Array(String))') AS known
+    FROM {DATABASE}.events FINAL
+    WHERE source = 'market' AND kind = 'graph_state'
+    ORDER BY run_id, state_seq
     """,
     f"""
     CREATE OR REPLACE VIEW {DATABASE}.v_memory AS
