@@ -77,6 +77,7 @@ def test_results_text_lists_messages_only_when_there_were_any():
 
 @pytest.mark.parametrize("changes, error", [
     ({"session": "fresh"}, "has no memory"),
+    ({"session": "fresh", "memory": {"enabled": True}}, "starts a new team"),
     ({"agents": [{"provider": "scripted", "model": "other", "script": "honest", "count": 3}]}, "same team"),
 ])
 def test_a_chained_session_needs_memory_and_the_same_team(tmp_path, changes, error):

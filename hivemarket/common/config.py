@@ -381,11 +381,13 @@ class ExperimentConfig(BaseModel):
         return self
 
     def _check_fresh(self) -> None:
-        """Nothing carries across rounds in a fresh session, memory files included."""
-        if "enabled" in self.memory.model_fields_set and self.memory.enabled:
-            raise ValueError("session: fresh carries nothing across rounds, so it has no memory tool; "
-                             "remove memory.enabled or use session: memory | reflection")
-        self.memory.enabled = False
+        """Nothing carries across rounds in a fresh session. Its memory tool is off unless memory.enabled: true
+        is set; then the agent keeps notes within a round and its memory is cleared when the round ends."""
+        if "enabled" not in self.memory.model_fields_set:
+            self.memory.enabled = False
+        if self.memory.carry_results:
+            raise ValueError("session: fresh carries nothing between sessions, so memory.carry_results has no "
+                             "effect; remove it or use session: memory | reflection")
 
     def _check_generated(self) -> None:
         """A market_generator game runs under the generator's rules: unique tokens, and 1-credit messages

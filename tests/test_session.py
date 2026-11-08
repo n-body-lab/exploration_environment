@@ -11,7 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from hivemarket.agent.prompts import context_text, reflection_text, restart_text
+from hivemarket.agent.prompts import context_text, memory_text, reflection_text, restart_text
 from hivemarket.agent.providers.anthropic_provider import AnthropicProvider
 from hivemarket.agent.providers.base import Turn
 from hivemarket.agent.providers.openai_provider import OpenAIProvider
@@ -41,8 +41,19 @@ def test_memory_is_the_default_and_fresh_turns_the_memory_tool_off():
     assert ExperimentConfig.model_validate(fresh.model_dump()).session == "fresh"  # its own dump validates
 
 
+def test_fresh_can_keep_a_memory_tool_within_the_round():
+    fresh = config(session="fresh", memory={"enabled": True})
+    assert fresh.memory.enabled
+    assert ExperimentConfig.model_validate(fresh.model_dump()).memory.enabled
+
+
+def test_the_main_arm_has_a_memory_tool_within_its_session():
+    main = yaml.safe_load((EXPERIMENTS / "session_main.yaml").read_text())
+    assert main["session"] == "fresh" and main["memory"] == {"enabled": True}
+
+
 @pytest.mark.parametrize("extra, error", [
-    ({"session": "fresh", "memory": {"enabled": True}}, "carries nothing across rounds"),
+    ({"session": "fresh", "memory": {"carry_results": True}}, "carries nothing between sessions"),
     ({"context": {"reset_each_round": False}}, "replaced by the experiment's `session`"),
     ({"session": "forgetful"}, "fresh"),
 ])
@@ -61,6 +72,10 @@ def agent_cfg(session, memory=True):
 
 def test_the_prompt_describes_the_session():
     assert "won't remember earlier rounds" in context_text(agent_cfg("fresh", memory=False))
+    assert "your memory until the round ends" in context_text(agent_cfg("fresh"))
+    assert "cleared when the round ends" in memory_text(agent_cfg("fresh"))
+    assert "persists across rounds" in memory_text(agent_cfg("memory"))
+    assert memory_text(agent_cfg("fresh", memory=False)) == "- You have no private memory."
     assert "continues from one round to the next" in context_text(agent_cfg("memory"))
     assert "reflect on how it went" not in context_text(agent_cfg("memory"))
     assert "reflect on how it went" in context_text(agent_cfg("reflection"))
@@ -109,6 +124,7 @@ def reflection_runtime(provider, market):
     rt.budget, rt.pending_checkpoint, rt.round_over, rt.market_closed = 10**9, None, None, False
     rt.summaries, rt.events, rt.restarts = [], [], 0
     rt.telemetry = SimpleNamespace(emit=lambda kind, **d: rt.events.append((kind, d)))
+    rt.tools = SimpleNamespace(memory=SimpleNamespace(clear=lambda: []))
     return rt
 
 
@@ -263,8 +279,8 @@ async def test_fresh_drops_a_budget_checkpoint_left_over_from_the_ended_round():
 # ------------------------------------------------- each mode in a real (scripted) run
 
 
-async def run(tmp_path, session, port):
-    cfg = yaml.safe_load((EXPERIMENTS / "local_fail.yaml").read_text()) | {"session": session}
+async def run(tmp_path, session, port, **extra):
+    cfg = yaml.safe_load((EXPERIMENTS / "local_fail.yaml").read_text()) | {"session": session, **extra}
     exp = tmp_path / f"{session}.yaml"
     exp.write_text(yaml.safe_dump(cfg))
     run_dir = create_run(exp, tmp_path / "runs", mode="local", local_base_port=port)
@@ -288,6 +304,19 @@ async def test_fresh_starts_every_round_from_nothing(tmp_path):
     write_report(run_dir)
     agent = json.loads((run_dir / "summary.json").read_text())["agents"]["agent-2"]
     assert (agent["round_resets"], agent["context_restarts"], agent["reflections"]) == (1, 0, 0)
+
+
+async def test_fresh_with_memory_keeps_notes_within_a_round_and_clears_them_at_its_end(tmp_path):
+    run_dir, traces = await run(tmp_path, "fresh", 20200, memory={"enabled": True})
+    [start] = of(traces, "runtime_start", "agent-2")
+    assert "memory" in start["data"]["tools"]
+    assert "cleared when the round ends" in start["data"]["system_prompt"]
+    [cleared] = [e for e in of(traces, "memory_cleared", "agent-2") if e["data"]["round"] == 1]
+    assert cleared["data"]["files"] == ["notes.md"]
+    [reset] = [e for e in of(traces, "context_reset", "agent-2") if e["data"]["reason"] == "new_round"]
+    assert "notes.md" not in reset["data"]["first_message"] and cleared["ts"] < reset["ts"]
+    notes = run_dir / "artifacts" / "agent-2" / "memory" / "notes.md"
+    assert not notes.exists() or "round 1" not in notes.read_text()  # round 1's notes went at its end
 
 
 async def test_memory_continues_the_same_conversation(tmp_path):
