@@ -40,6 +40,9 @@ class AgentSpec(BaseModel):
     fallbacks: bool = True  # anthropic: server-side refusal fallback (the serving model is logged per turn)
     max_steps: int = 80  # max LLM calls
     max_tokens: int = 16000  # per response; keep well below the context window (e.g. 4096 for 32K models)
+    # Sampling temperature, sent only if set (otherwise the provider's default). Every call uses it: turns,
+    # checkpoint summaries and the post-session questionnaire.
+    temperature: float | None = Field(default=None, ge=0, le=2)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # provider-specific request fields, e.g. {enable_thinking: false}
     script: str | None = None  # scripted provider: honest | rogue
     prompt_vars: dict[str, Any] = Field(default_factory=dict)
@@ -47,6 +50,15 @@ class AgentSpec(BaseModel):
 
 class AgentGroup(AgentSpec):
     count: int = 1
+
+    @model_validator(mode="after")
+    def _check_temperature(self) -> "AgentGroup":
+        # Anthropic accepts only temperature 1 (or none) while thinking is on.
+        if (self.provider == "anthropic" and self.thinking == "adaptive" and self.temperature is not None
+                and self.temperature != 1):
+            raise ValueError(f"temperature {self.temperature} with anthropic thinking: Anthropic only allows 1 while "
+                             "thinking is on; remove temperature or set thinking: off")
+        return self
 
 
 class AffordanceConfig(BaseModel):

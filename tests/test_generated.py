@@ -431,6 +431,10 @@ def test_the_session_arms_build_one_round_without_declare_stuck(name):
     assert cfg.memory.enabled  # main: within its session only; exploratory: carried between sessions
     # main: session: reflection for the post-session questionnaire (with one round it plays as fresh)
     assert cfg.session == ("reflection" if name == "session_main" else "memory")
+    if name == "session_main":  # the locked settings: temperature 0.6, every agent starts with >= 1 credit
+        assert {g.temperature for g in cfg.agents} == {0.6}
+        assert world["generated"]["credit_allocation"]["minimum_initial_credits"] == 1
+        assert all(n["credits"] >= 1 for n in world["nodes"].values())
 
 
 @needs_generator

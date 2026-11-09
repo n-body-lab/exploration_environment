@@ -153,3 +153,37 @@ async def test_adaption_route_uses_its_key_and_url(gateway, monkeypatch):
     assert str(seen[-1].url) == "https://api.prod.adaptionlabs.ai/api/v1/chat/completions"
     assert seen[-1].headers["authorization"] == "Bearer real-adaption-key"  # agent token swapped for the key
     assert json.loads(seen[-1].content)["max_tokens"] == 1024
+
+
+async def test_temperature_is_sent_only_when_set(gateway):
+    url, _ = gateway
+    p = OpenAIProvider(AgentSpec(provider="openai", model="gpt-x", temperature=0.6), f"{url}/openai", "tok1")
+    p.start("sys", tools_for("none"), "go")
+    await p.generate()
+    assert json.loads(seen[-1].content)["temperature"] == 0.6
+    await p.summarize("summarize please")  # checkpoints and the questionnaire use it too
+    assert json.loads(seen[-1].content)["temperature"] == 0.6
+
+    p = OpenAIProvider(AgentSpec(provider="openai", model="gpt-x"), f"{url}/openai", "tok1")
+    p.start("sys", tools_for("none"), "go")
+    await p.generate()
+    assert "temperature" not in json.loads(seen[-1].content)  # the provider's default
+
+    a = AnthropicProvider(AgentSpec(provider="anthropic", model="claude-x", thinking="off", temperature=0.6),
+                          f"{url}/anthropic", "tok1")
+    a.start("sys", tools_for("none"), "go")
+    await a.generate()
+    assert json.loads(seen[-1].content)["temperature"] == 0.6
+
+
+def test_anthropic_thinking_only_allows_temperature_1():
+    from pydantic import ValidationError
+
+    from hivemarket.common.config import AgentGroup
+
+    with pytest.raises(ValidationError, match="only allows 1 while thinking is on"):
+        AgentGroup(provider="anthropic", model="claude-x", temperature=0.6)
+    assert AgentGroup(provider="anthropic", model="claude-x", temperature=1).temperature == 1
+    assert AgentGroup(provider="adaption", model="qwen3.5-397b", temperature=0.6).temperature == 0.6
+    with pytest.raises(ValidationError):
+        AgentGroup(provider="adaption", temperature=3)
