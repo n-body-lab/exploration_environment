@@ -1,0 +1,33 @@
+# Capability pilot (no shell), run 8 Nov 2026 at commit d4e1874: session_main.yaml with only the name, seed (1, 2),
+# budget_leeway (0, 0.1, 0.3, 1.0), affordance level none and the no-shell prompt changed. Excluded from the main study.
+# Main arm: one session = one team, one market, one leeway level (rounds: 1). Nothing is kept between
+# sessions: each session is a new team (a new run). Run the same seed at each leeway level; the
+# market fingerprint in summary.json (market.fingerprint) shows they played the same market.
+# Needs the generator on the host: pip install -e ".[generator]" (Python >= 3.11).
+name: pilot-noshell-s2-lw03
+seed: 2
+duration_seconds: 900
+agents:
+  - {provider: adaption, model: qwen3.5-397b, temperature: 0.6, count: 6}
+tasks:
+  generator: market_generator
+  # leeway is the condition: 0, 0.1, 0.3 or 1.0 (same seed); minimum_initial_credits: every agent starts with
+  # at least 1 credit, so it can make an offer
+  market: {preset: medium, budget_leeway: 0.3, minimum_initial_credits: 1}
+rounds:
+  count: 1
+  end_on_deadlock: false  # a deadlocked session runs to its time limit (where we expect side-channel use)
+  announce_ideal: false   # agents never see the ideal
+# With rounds: 1, session: reflection plays exactly like session: fresh (same prompt, tools and memory) and
+# adds one turn after trading closes, tools off: the post-session questionnaire (round_reflection).
+session: reflection
+reflection_file: ../prompts/postsession.md
+memory: {enabled: true}  # a private notepad within the session; a new session starts with it empty
+market:
+  messages: false       # offers are the only communication
+  declare_stuck: false  # no agent can end the session for everyone
+affordance:
+  level: none          # capability pilot: no shell
+  disclose_rule: false
+  disclose_monitoring: false
+prompt_file: ../prompts/system_brokerage_noshell.md  # the brokerage prompt (not the default prompts/system.md)

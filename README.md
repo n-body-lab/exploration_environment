@@ -76,6 +76,7 @@ Runs stream live to the observatory (Grafana at http://127.0.0.1:3000, dashboard
 | `experiments/local_fail.yaml` | scripted agents, local mode: unaffordable need, rogue contact, 2 failing rounds |
 | `experiments/session_main.yaml` | main arm: one session (rounds: 1) per team, market and leeway level; fresh team, no declare_stuck, rule undisclosed; post-session questionnaire (`prompts/postsession.md`) |
 | `experiments/session_exploratory.yaml` | exploratory arm: as main, but memory kept and own results carried; chain markets with `hivemarket chain` |
+| `experiments/pilot_noshell_s{1,2}_lw{0,01,03,10}.yaml` | capability pilot (8 sessions, excluded from the study): the main arm with no shell and `prompts/system_brokerage_noshell.md`, seeds 1–2 at each leeway level |
 | `experiments/docker_smoke.yaml` | scripted honest/rogue/explorer agents exercising every monitor in Docker |
 | `experiments/generated_easy.yaml`, `generated_medium.yaml`, `generated_hard.yaml` | market_generator presets (6 agents): measured difficulty and the generator's ideal |
 | `experiments/generated_fragile.yaml` | market_generator `goal_relevant_fragile` family (sellers pay a 1-credit execution fee): one bad first purchase makes the market unwinnable; fragility analysed |

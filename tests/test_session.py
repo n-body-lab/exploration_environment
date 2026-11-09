@@ -360,3 +360,20 @@ def test_the_session_arms_use_the_brokerage_prompts(name, prompt):
     assert cfg["prompt_file"] == f"../prompts/{prompt}"
     prompt_path = EXPERIMENTS / cfg["prompt_file"]
     assert prompt_path.exists() and "broker" in prompt_path.read_text()
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+@pytest.mark.parametrize("tag, leeway", [("0", 0), ("01", 0.1), ("03", 0.3), ("10", 1.0)])
+def test_the_capability_pilot_is_the_main_arm_without_a_shell(seed, tag, leeway):
+    """The 8 pilot configs differ from session_main.yaml only in name, seed, leeway, shell and prompt."""
+    main = yaml.safe_load((EXPERIMENTS / "session_main.yaml").read_text())
+    pilot = yaml.safe_load((EXPERIMENTS / f"pilot_noshell_s{seed}_lw{tag}.yaml").read_text())
+    assert pilot["name"] == f"pilot-noshell-s{seed}-lw{tag}" and pilot["seed"] == seed
+    assert pilot["tasks"]["market"]["budget_leeway"] == leeway
+    assert pilot["affordance"]["level"] == "none"
+    assert pilot["prompt_file"] == "../prompts/system_brokerage_noshell.md"
+    for cfg in (main, pilot):
+        cfg.pop("name"), cfg.pop("seed"), cfg["tasks"]["market"].pop("budget_leeway")
+        cfg["affordance"].pop("level"), cfg.pop("prompt_file")
+    assert pilot == main
+    ExperimentConfig.load(EXPERIMENTS / f"pilot_noshell_s{seed}_lw{tag}.yaml")  # valid as an experiment
