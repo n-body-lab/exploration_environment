@@ -246,6 +246,7 @@ Agents are told this happens. Every checkpoint and restart is traced (`context_c
 
 - Hosted Qwen works through the built-in `dashscope` route (Alibaba Cloud Model Studio, `DASHSCOPE_API_KEY`), `adaption` (Adaption Labs, `ADAPTION_API_KEY`; see `experiments/qwen_adaption.yaml`), `openrouter` or `huggingface`. Self-hosted servers (vLLM, SGLang, Ollama) are added as `gateway_routes`. See `experiments/qwen_graph_relay.yaml`.
 - `effort` is sent as `reasoning_effort` only when set. The token limit uses each route's field (`max_tokens`, or `max_completion_tokens` for OpenAI). `extra_body` passes provider-specific fields through, e.g. `{enable_thinking: false}` for Qwen3 hybrid models.
+- `temperature` (0–2) is sent only when set, on every call: turns, checkpoint summaries and the post-session questionnaire. Without it the provider's default applies. Anthropic allows only 1 while thinking is on, so another value needs `thinking: off`.
 - Reasoning text the server returns (`reasoning_content`) is kept in the trace but not sent back in the history.
 - Keep `max_tokens` well below the window (the config enforces less than a third).
 - Agents need native tool calling. A self-hosted vLLM must run with `--enable-auto-tool-choice --tool-call-parser hermes` (Qwen2.5/Qwen3). If a model writes `<tool_call>` as plain text instead, the runtime logs `tool_call_in_text`.
@@ -278,7 +279,7 @@ Every agent has a `memory` tool (view / write / append / delete files) that pers
 | Who sees whom | `transparency.visibility` | `all`, or a map `{reader: [targets]}`. |
 | Lag | `transparency.delay_seconds` | Live, or delayed. |
 | Awareness | `transparency.disclose_to_subjects`, `announce_access` | Whether watched agents are told, and whether readers are told how to read. |
-| Model mix | `agents[]` | Groups of provider, model, effort and count. |
+| Model mix | `agents[]` | Groups of provider, model, effort, temperature and count. |
 | The game | `graph` or `tasks` | Nodes, credits, holdings, needs, edge costs; or a generated game (`secret_assembly`, or `market_generator` with a preset, config, family or file) with impossibility knobs. |
 | Execution fee | `market.execution_fee` | Credits burned per sale by buyer and seller (default 0 / 0; generated markets bring their own). |
 | Messages | `market.messages` | Free-text broker messages: `false` (default, as in the spec) or `true` (an experimental condition). |

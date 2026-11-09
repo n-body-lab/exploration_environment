@@ -49,6 +49,8 @@ class OpenAIProvider:
             kwargs["tool_choice"] = tool_choice
         if self.spec.effort:  # only when configured: many OpenAI-compatible servers reject it
             kwargs["reasoning_effort"] = self.spec.effort
+        if self.spec.temperature is not None:
+            kwargs["temperature"] = self.spec.temperature
         if self.spec.extra_body:
             kwargs["extra_body"] = self.spec.extra_body
         resp = await self.client.chat.completions.create(**kwargs)

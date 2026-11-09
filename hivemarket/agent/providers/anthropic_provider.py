@@ -52,8 +52,12 @@ class AnthropicProvider:
             kwargs["output_config"] = {"effort": self.spec.effort or "high"}
         elif self.spec.effort:
             kwargs["output_config"] = {"effort": self.spec.effort}
-        if self.spec.extra_body:
-            kwargs["extra_body"] = self.spec.extra_body
+        extra = dict(self.spec.extra_body)
+        if self.spec.temperature is not None:
+            # In the body: this SDK's beta create() has no temperature argument.
+            extra["temperature"] = self.spec.temperature
+        if extra:
+            kwargs["extra_body"] = extra
         if self.spec.fallbacks:
             kwargs["betas"] = [FALLBACK_BETA]
             kwargs["fallbacks"] = "default"
