@@ -23,7 +23,7 @@ mkdir -p "$RUNS" "$OUT"
 echo "== 1. Unzip every zip into one runs folder"
 shopt -s nullglob
 for z in "$IN"/*.zip; do
-  unzip -qo "$z" -d "$RUNS/tmp_unzip"
+  unzip -qo "$z" -d "$RUNS/tmp_unzip" -x "__MACOSX/*" "*/._*"
 done
 # move every main-s* run folder (wherever it sits inside the zips) up to runs_all/
 find "$RUNS/tmp_unzip" -maxdepth 4 -type d -name 'main-s*' -prune -exec mv -n {} "$RUNS"/ \; 2>/dev/null || true
