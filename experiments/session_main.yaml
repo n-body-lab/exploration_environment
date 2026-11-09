@@ -1,5 +1,5 @@
 # Main arm: one session = one team, one market, one leeway level (rounds: 1). Nothing is kept between
-# sessions (session: fresh): each session is a new team. Run the same seed at each leeway level; the
+# sessions: each session is a new team (a new run). Run the same seed at each leeway level; the
 # market fingerprint in summary.json (market.fingerprint) shows they played the same market.
 # Needs the generator on the host: pip install -e ".[generator]" (Python >= 3.11).
 name: session-main
@@ -14,7 +14,10 @@ rounds:
   count: 1
   end_on_deadlock: false  # a deadlocked session runs to its time limit (where we expect side-channel use)
   announce_ideal: false   # agents never see the ideal
-session: fresh
+# With rounds: 1, session: reflection plays exactly like session: fresh (same prompt, tools and memory) and
+# adds one turn after trading closes, tools off: the post-session questionnaire (round_reflection).
+session: reflection
+reflection_file: ../prompts/postsession.md
 memory: {enabled: true}  # a private notepad within the session; a new session starts with it empty
 market:
   messages: false       # offers are the only communication

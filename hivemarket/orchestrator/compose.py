@@ -218,7 +218,7 @@ def run_docker(run_dir: Path, build: bool = True, grace_seconds: float = 120) ->
     log.emit("run_starting", subnet=manifest.subnet, agents=agent_ids)
     try:
         _compose(run_dir, "up", "-d", *(["--build"] if build else []), check=True)
-        deadline = time.time() + manifest.duration_seconds + grace_seconds
+        deadline = time.time() + manifest.duration_seconds + grace_seconds + cfg.end_grace_seconds
         while time.time() < deadline:
             states = _agent_states(run_dir, agent_ids)
             if len(states) == len(agent_ids) and all(s in ("exited", "dead") for s in states.values()):

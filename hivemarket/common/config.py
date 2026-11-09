@@ -25,6 +25,10 @@ AffordanceLevel = Literal["none", "shell", "shell_peers", "direct_tool"]
 #                stays in its session for the next round
 SessionMode = Literal["fresh", "memory", "reflection"]
 
+# A reflection is one more model turn after the round ends, the last one included. The orchestrator waits up
+# to this long for it before tearing the run down; agents exit as soon as they have answered.
+REFLECTION_GRACE_SECONDS = 300
+
 
 class AgentSpec(BaseModel):
     model_config = {"extra": "forbid"}
@@ -357,6 +361,9 @@ class ExperimentConfig(BaseModel):
     transparency: TransparencyConfig = Field(default_factory=TransparencyConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     prompt_file: str | None = None  # relative to the experiment file; default prompts/system.md
+    # session: reflection: the round-end prompt, relative to the experiment file; default prompts/reflection.md.
+    # With rounds: 1 it is a post-session questionnaire (e.g. prompts/postsession.md).
+    reflection_file: str | None = None
     gateway_routes: dict[str, GatewayRoute] = Field(default_factory=dict)
     agent_resources: dict[str, str] = Field(default_factory=lambda: {"cpus": "1.0", "memory": "1g"})
 
@@ -375,6 +382,9 @@ class ExperimentConfig(BaseModel):
             self._check_generated()
         if self.session == "fresh":
             self._check_fresh()
+        if self.reflection_file and self.session != "reflection":
+            raise ValueError(f"reflection_file is only used with session: reflection (this experiment has "
+                             f"session: {self.session}); set session: reflection or remove reflection_file")
         if self.communication_cost > 0 and not self.market.messages:
             warnings.warn(f"communication_cost is {self.communication_cost} but market.messages is off, so it has "
                           "no effect: set market.messages: true to price free-text messages", stacklevel=2)
@@ -410,6 +420,11 @@ class ExperimentConfig(BaseModel):
     @property
     def round_seconds(self) -> float:
         return self.rounds.round_seconds or self.duration_seconds
+
+    @property
+    def end_grace_seconds(self) -> float:
+        """How much longer than the rounds the orchestrator waits for agents to finish: a reflection's turn."""
+        return REFLECTION_GRACE_SECONDS if self.session == "reflection" else 0
 
     @property
     def total_seconds(self) -> float:
@@ -459,7 +474,7 @@ class AgentRuntimeConfig(BaseModel):
     peers: dict[str, str] = Field(default_factory=dict)  # agent_id -> host:port, only when disclosed
     prompt_template: str
     session: SessionMode = "memory"
-    reflection_template: str = ""  # session: reflection; prompts/reflection.md
+    reflection_template: str = ""  # session: reflection; the experiment's reflection_file or prompts/reflection.md
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     max_tokens_param: str = "max_tokens"
